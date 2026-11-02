@@ -1,0 +1,15 @@
+{
+  "name": "offline-rust-linux",
+  "output": "artifacts/offline-rust-linux.rpk",
+  "cargoIndexUrl": "https://index.crates.io/",
+  "cargoDownloadUrl": "https://static.crates.io/crates/{crate}/{crate}-{version}.crate",
+  "cargoProject": "./my-rust-project",
+  "toolchains": [
+    {
+      "version": "1.88.0",
+      "target": "x86_64-unknown-linux-gnu"
+    }
+  ],
+  "retryCount": 5,
+  "retryDelaySeconds": 3
+}

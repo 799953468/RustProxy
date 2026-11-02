@@ -1,0 +1,24 @@
+@page "/import"
+@using Microsoft.AspNetCore.Components.Forms
+@inject RustProxy.Server.Services.PackageCatalog Catalog
+
+<PageTitle>Import / RustProxy</PageTitle>
+<div class="workspace-head"><div><p class="eyebrow">Offline package intake</p><h1>Import a package</h1><p class="lede">Upload a validated .rpk archive. The archive is removed after its source content is extracted.</p></div></div>
+<section class="import-layout"><div class="upload-panel"><InputFile OnChange="OnFileSelected" accept=".rpk" /><div class="upload-copy"><strong>@(selectedFile?.Name ?? "Choose an .rpk file")</strong><span>@(selectedFile is null ? "The manifest and every checksum will be verified before import." : $"{selectedFile.Size / 1024d:0.0} KB selected")</span></div><button class="button button-primary" @onclick="ImportAsync" disabled="@(selectedFile is null || importing)">@(importing ? "Importing…" : "Import package")</button></div>@if (!string.IsNullOrWhiteSpace(message)){<div class="notice @(failed ? "notice-error" : "notice-success")">@message</div>}</section>
+<section class="section-block import-notes"><div><span class="note-number">01</span><h2>What gets imported</h2><p>Cargo sparse index files, crate archives, rustup channel metadata, and component archives are kept in their original paths.</p></div><div><span class="note-number">02</span><h2>What gets checked</h2><p>The server validates the package format, rejects unsafe paths, then verifies every file against its recorded SHA-256.</p></div></section>
+
+@code {
+    private IBrowserFile? selectedFile;
+    private bool importing;
+    private bool failed;
+    private string? message;
+    private void OnFileSelected(InputFileChangeEventArgs args) { selectedFile = args.File; message = null; }
+    private async Task ImportAsync()
+    {
+        if (selectedFile is null) return;
+        importing = true; failed = false; message = null;
+        try { await using var stream = selectedFile.OpenReadStream(1024L * 1024L * 1024L); var manifest = await Catalog.ImportAsync(stream, selectedFile.Name); message = $"Imported {manifest.Name} with {manifest.Files.Count} files."; selectedFile = null; }
+        catch (Exception exception) when (exception is InvalidDataException or IOException or ArgumentException) { failed = true; message = exception.Message; }
+        finally { importing = false; }
+    }
+}

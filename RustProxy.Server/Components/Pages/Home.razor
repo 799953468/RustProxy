@@ -1,0 +1,27 @@
+﻿@page "/"
+@using RustProxy.Core.Package
+@inject RustProxy.Server.Services.PackageCatalog Catalog
+
+<PageTitle>RustProxy / Sources</PageTitle>
+
+<div class="workspace-head"><div><p class="eyebrow">Offline source registry</p><h1>Available sources</h1><p class="lede">Cargo dependencies and Rust toolchains available to offline clients.</p></div><a class="button button-primary" href="import">Import package</a></div>
+
+<div class="stat-strip"><div><strong>@dependencies.Count</strong><span>Cargo dependencies</span></div><div><strong>@toolchains.Count</strong><span>Toolchains</span></div><div><strong>@fileCount</strong><span>Source files</span></div><div><strong>Ready</strong><span>Source status</span></div></div>
+
+<div class="source-columns">
+    <section class="section-block"><div class="section-heading"><h2>Cargo dependencies</h2><span>@dependencies.Count crates</span></div>@if (dependencies.Count == 0){<div class="empty-state compact"><h3>No Cargo dependencies</h3><p>Import a package created from a Cargo.lock project.</p></div>}else{<div class="dependency-list">@foreach(var dependency in dependencies){<div class="dependency-row"><span class="package-icon">CRG</span><span class="dependency-name">@dependency.Name</span><code>@dependency.Version</code></div>}</div>}</section>
+    <section class="section-block"><div class="section-heading"><h2>Rust toolchains</h2><span>@toolchains.Count targets</span></div>@if (toolchains.Count == 0){<div class="empty-state compact"><h3>No toolchains</h3><p>Import a package containing rustup distributions.</p></div>}else{<div class="toolchain-list">@foreach(var toolchain in toolchains){<a class="toolchain-row" href="client-config"><span class="config-badge rustup-badge">R</span><span><strong>@toolchain.Version</strong><small>@toolchain.Target</small></span><span class="row-arrow">›</span></a>}</div>}</section>
+</div>
+
+@code {
+    private List<CargoDependencyInfo> dependencies = [];
+    private List<RustToolchainInfo> toolchains = [];
+    private int fileCount;
+    protected override async Task OnInitializedAsync()
+    {
+        var manifests = await Catalog.ListAsync();
+        dependencies = manifests.SelectMany(manifest => manifest.CargoDependencies).GroupBy(item => $"{item.Name}:{item.Version}").Select(group => group.First()).OrderBy(item => item.Name).ThenBy(item => item.Version).ToList();
+        toolchains = manifests.SelectMany(manifest => manifest.Toolchains).GroupBy(item => $"{item.Version}:{item.Target}").Select(group => group.First()).OrderBy(item => item.Version).ThenBy(item => item.Target).ToList();
+        fileCount = manifests.Sum(manifest => manifest.Files.Count);
+    }
+}

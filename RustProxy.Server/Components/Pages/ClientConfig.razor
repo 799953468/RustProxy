@@ -1,0 +1,75 @@
+@page "/client-config"
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject IJSRuntime Js
+@inject NavigationManager Navigation
+
+<PageTitle>Client config / RustProxy</PageTitle>
+<div class="workspace-head"><div><p class="eyebrow">Connect local clients</p><h1>Client configuration</h1><p class="lede">Choose the operating system used by the offline client.</p></div></div>
+
+<section class="platform-picker" aria-label="Operating system">
+    <span class="picker-label">Detected platform</span>
+    <div class="platform-tabs" role="tablist">
+        @foreach (var platform in platforms)
+        {
+            <button class="platform-tab @(selectedPlatform == platform.Id ? "selected" : "")" role="tab" aria-selected="@(selectedPlatform == platform.Id)" @onclick="() => SelectPlatform(platform.Id)">
+                <span class="platform-symbol">@platform.Symbol</span><span>@platform.Name</span>@if (detectedPlatform == platform.Id){<small>detected</small>}
+            </button>
+        }
+    </div>
+</section>
+
+<div class="selected-platform-note"><span class="status-dot"></span><span>Showing commands for <strong>@CurrentPlatform.Name</strong>. You can switch platforms at any time.</span></div>
+
+<section class="config-grid">
+    <div class="config-card"><div class="config-card-head"><span class="config-badge cargo-badge">C</span><div><h2>Cargo</h2><p>Configure the local sparse registry for crates.</p></div></div><label>Registry index</label><code class="code-block">sparse+@BaseUri/cargo/index/</code><label>Cargo config</label><pre><code>[registries.local]
+index = "sparse+@BaseUri/cargo/index/"
+
+[registry]
+default = "local"
+</code></pre><p class="config-hint">Save as <code>@CurrentPlatform.CargoConfigPath</code></p></div>
+    <div class="config-card"><div class="config-card-head"><span class="config-badge rustup-badge">R</span><div><h2>rustup</h2><p>Point toolchain downloads at this local source.</p></div></div><label>@CurrentPlatform.ShellLabel</label><pre><code>@RustupCommand
+@CargoCommand</code></pre><label>Verify the connection</label><pre><code>rustup toolchain install stable</code></pre></div>
+</section>
+
+<div class="config-footnote"><span class="status-dot"></span><span>These values use the current browser origin. Replace <code>@BaseUri</code> with the server address when configuring another machine.</span></div>
+
+@code {
+    private readonly IReadOnlyList<PlatformOption> platforms =
+    [
+        new("linux", "Linux", "⌁", "~/.cargo/config.toml", "Shell", "export RUSTUP_DIST_SERVER=" + "\"{0}/rustup\"", "export CARGO_REGISTRIES_LOCAL_INDEX=" + "\"sparse+{0}/cargo/index/\""),
+        new("macos", "macOS", "⌘", "~/.cargo/config.toml", "Terminal", "export RUSTUP_DIST_SERVER=" + "\"{0}/rustup\"", "export CARGO_REGISTRIES_LOCAL_INDEX=" + "\"sparse+{0}/cargo/index/\""),
+        new("windows", "Windows", "⊞", "%USERPROFILE%\\.cargo\\config.toml", "PowerShell", "$env:RUSTUP_DIST_SERVER = " + "\"{0}/rustup\"", "$env:CARGO_REGISTRIES_LOCAL_INDEX = " + "\"sparse+{0}/cargo/index/\"")
+    ];
+    private string selectedPlatform = "linux";
+    private string? detectedPlatform;
+    private IJSObjectReference? module;
+    private string BaseUri => Navigation.BaseUri.TrimEnd('/');
+    private PlatformOption CurrentPlatform => platforms.First(platform => platform.Id == selectedPlatform);
+    private string RustupCommand => string.Format(CurrentPlatform.RustupTemplate, BaseUri);
+    private string CargoCommand => string.Format(CurrentPlatform.CargoTemplate, BaseUri);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            module = await Js.InvokeAsync<IJSObjectReference>("import", "./platform-detector.js");
+            detectedPlatform = await module.InvokeAsync<string>("detectPlatform");
+            selectedPlatform = platforms.Any(platform => platform.Id == detectedPlatform) ? detectedPlatform : "linux";
+            StateHasChanged();
+        }
+        catch (JSException)
+        {
+            detectedPlatform = null;
+        }
+    }
+
+    private void SelectPlatform(string platform) => selectedPlatform = platform;
+    public async ValueTask DisposeAsync() { if (module is not null) await module.DisposeAsync(); }
+    private sealed record PlatformOption(string Id, string Name, string Symbol, string CargoConfigPath, string ShellLabel, string RustupTemplate, string CargoTemplate)
+    {
+        public string RustupCommand => string.Empty;
+        public string CargoCommand => string.Empty;
+    }
+}
