@@ -13,7 +13,7 @@ public sealed class FetchConfiguration
     [Required]
     public string Output { get; set; } = "offline-rust.rpk";
 
-    /// <summary>Gets or sets the project directory containing Cargo.lock.</summary>
+    /// <summary>Gets or sets the project directory containing Cargo.toml and optionally Cargo.lock.</summary>
     public string? CargoProject { get; set; }
 
     /// <summary>Gets or sets the sparse Cargo registry index base URL.</summary>

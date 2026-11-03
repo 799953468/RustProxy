@@ -17,13 +17,17 @@ public sealed class CargoDependencyFetcher(HttpClient httpClient, RetryExecutor 
     private static readonly Regex ChecksumPattern = new("(?m)^checksum\\s*=\\s*\"(?<value>[a-fA-F0-9]{64})\"$", RegexOptions.Compiled);
     private static readonly Regex DlPattern = new("\\\"dl\\\"\\s*:\\s*\\\"(?<value>[^\\\"]+)\\\"", RegexOptions.Compiled);
 
-    /// <summary>Downloads registry index entries and crate archives into a source-compatible tree.</summary>
+    /// <summary>Downloads registry dependencies from Cargo.lock, generating a lockfile from Cargo.toml when absent.</summary>
     public async Task<IReadOnlyList<CargoDependencyInfo>> FetchAsync(string projectDirectory, string destinationDirectory, string indexUrl, string? downloadUrlTemplate = null, int maxAttempts = 4, TimeSpan? retryDelay = null, CancellationToken cancellationToken = default)
     {
         var root = Path.GetFullPath(projectDirectory);
         var lockPath = Path.Combine(root, "Cargo.lock");
-        if (!File.Exists(lockPath)) throw new FileNotFoundException("Cargo.lock is required to fetch exact Cargo dependencies.", lockPath);
         var indexBase = EnsureTrailingSlash(new Uri(indexUrl));
+        if (!File.Exists(lockPath))
+        {
+            logger.Info("Cargo.lock is missing; resolving Cargo.toml with Cargo.");
+            await new CargoCommandResolver(logger).GenerateLockAsync(root, cancellationToken);
+        }
         logger.Info($"Cargo: reading {lockPath}");
         using var indexResponse = await RetryAsync("Cargo sparse index config.json", () => httpClient.GetAsync(new Uri(indexBase, "config.json"), cancellationToken), maxAttempts, retryDelay, cancellationToken);
         indexResponse.EnsureSuccessStatusCode();

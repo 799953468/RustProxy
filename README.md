@@ -92,7 +92,7 @@ dotnet run --project RustProxy.Cli -- fetch ./rustproxy.fetch.json
 
 Paths in `output` and `cargoProject` are resolved relative to the configuration file. `version` can be `stable`, `beta`, `nightly`, an exact version such as `1.88.0`, or a dated channel. Exact versions are recommended for reproducible offline environments. Each fetch prints timestamps and stage progress. Retryable network and I/O failures use exponential backoff: with the example above, attempts wait 3, 6, 12 and 24 seconds before the next attempt. HTTP 4xx and validation errors fail immediately.
 
-The Cargo section requires a project with `Cargo.lock`. It reads registry packages from the lockfile and downloads the sparse index `config.json`, each crate index file, and each `.crate` archive from the configured source. The package preserves the source layout:
+The Cargo section requires a project with `Cargo.toml`. If `Cargo.lock` exists, its exact registry dependencies are used. Otherwise RustProxy first uses `cargo` found on the system `PATH`. If unavailable, it downloads the official `rustup-init` bootstrapper, installs the stable minimal toolchain into `~/.rustproxy` (without modifying `PATH`), and invokes Cargo to generate the lockfile. Cargo then resolves the project using its standard semantics; network access to the configured Cargo registry is required. RustProxy subsequently downloads the lockfile's sparse index entries and crate archives into the package. The package preserves the source layout:
 
 ```text
 cargo/
