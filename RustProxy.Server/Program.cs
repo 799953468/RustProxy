@@ -6,7 +6,6 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddMemoryCache();
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
-builder.Services.AddSingleton<PackageStore>();
 builder.Services.AddSingleton<PackageCatalog>();
 
 var app = builder.Build();

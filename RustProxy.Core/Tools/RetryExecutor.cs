@@ -17,7 +17,8 @@ public sealed class ConsoleFetchLogger : IFetchLogger
     public void Info(string message) => Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] {message}");
 
     /// <inheritdoc />
-    public void Retry(string operation, int attempt, int maxAttempts, Exception exception, TimeSpan delay) => Console.Error.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] retry {attempt}/{maxAttempts} for {operation} in {delay.TotalSeconds:0.#}s: {exception.Message}");
+    public void Retry(string operation, int attempt, int maxAttempts, Exception exception, TimeSpan delay) =>
+        Console.Error.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] retry {attempt}/{maxAttempts} for {operation} in {delay.TotalSeconds:0.#}s: {exception.Message}");
 }
 
 /// <summary>Retries transient asynchronous operations with exponential backoff.</summary>
@@ -31,7 +32,10 @@ public sealed class RetryExecutor(IFetchLogger logger)
         Exception? last = null;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            try { return await action(); }
+            try
+            {
+                return await action();
+            }
             catch (Exception exception) when (attempt < maxAttempts && IsRetryable(exception))
             {
                 last = exception;
@@ -40,8 +44,12 @@ public sealed class RetryExecutor(IFetchLogger logger)
                 await Task.Delay(delay, cancellationToken);
             }
         }
+
         throw last ?? new InvalidOperationException($"Operation failed: {operation}");
     }
 
-    private static bool IsRetryable(Exception exception) => exception is IOException or TimeoutException or TaskCanceledException || exception is HttpRequestException httpException && (httpException.StatusCode is null || (int)httpException.StatusCode >= 500);
+    private static bool IsRetryable(Exception exception) =>
+        exception is IOException or TimeoutException or TaskCanceledException ||
+        exception is HttpRequestException httpException &&
+        (httpException.StatusCode is null || (int)httpException.StatusCode >= 500);
 }

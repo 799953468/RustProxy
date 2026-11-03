@@ -6,7 +6,7 @@ namespace RustProxy.Core.Tools;
 public sealed class ExternalCommandRunner
 {
     /// <summary>Runs a command and returns its standard output.</summary>
-    public async Task<CommandResult> RunAsync(string fileName, IEnumerable<string> arguments, string? workingDirectory = null, CancellationToken cancellationToken = default)
+    public static async Task<CommandResult> RunAsync(string fileName, IEnumerable<string> arguments, string? workingDirectory = null, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
         var startInfo = new ProcessStartInfo

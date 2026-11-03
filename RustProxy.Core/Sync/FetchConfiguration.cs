@@ -44,6 +44,4 @@ public sealed class ToolchainConfiguration
     /// <summary>Gets or sets the target triple.</summary>
     [Required]
     public string Target { get; set; } = string.Empty;
-
-
 }

@@ -1,0 +1,10 @@
+root = true
+
+[*.cs]
+# 设置期望的最大行宽
+max_line_length = 200
+# 或使用 ReSharper 专属属性名，效果相同
+resharper_csharp_max_line_length = 200
+
+# 确保换行功能被启用（默认通常为 true）
+resharper_csharp_wrap_long_lines = true

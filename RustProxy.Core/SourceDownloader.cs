@@ -4,7 +4,7 @@ using RustProxy.Core.Storage;
 namespace RustProxy.Core.Download;
 
 /// <summary>Downloads selected files from a Rust source into a staging directory and packages them.</summary>
-public sealed class SourceDownloader(HttpClient httpClient, PackageStore packageStore)
+public sealed class SourceDownloader(HttpClient httpClient)
 {
     /// <summary>Downloads the requested paths and creates a portable package.</summary>
     public async Task DownloadAsync(SourceDownloadOptions options, CancellationToken cancellationToken = default)
@@ -17,7 +17,8 @@ public sealed class SourceDownloader(HttpClient httpClient, PackageStore package
             foreach (var path in options.Paths)
             {
                 var normalized = path.Replace('\\', '/').TrimStart('/');
-                if (normalized.Contains("..", StringComparison.Ordinal)) throw new ArgumentException($"Unsafe source path: {path}", nameof(options));
+                if (normalized.Contains("..", StringComparison.Ordinal))
+                    throw new ArgumentException($"Unsafe source path: {path}", nameof(options));
                 using var response = await httpClient.GetAsync(new Uri(options.Source, normalized), cancellationToken);
                 response.EnsureSuccessStatusCode();
                 var target = Path.Combine(staging, normalized.Replace('/', Path.DirectorySeparatorChar));
@@ -26,8 +27,20 @@ public sealed class SourceDownloader(HttpClient httpClient, PackageStore package
                 await using var output = new FileStream(target, FileMode.Create, FileAccess.Write, FileShare.None, 65536, true);
                 await source.CopyToAsync(output, cancellationToken);
             }
-            await packageStore.CreateFromDirectoryAsync(staging, options.OutputPath, options.Name, options.Source.ToString(), cancellationToken);
+
+            await PackageStore.CreateFromDirectoryAsync(staging, options.OutputPath, options.Name,
+                options.Source.ToString(), cancellationToken: cancellationToken);
         }
-        finally { try { Directory.Delete(staging, recursive: true); } catch { } }
+        finally
+        {
+            try
+            {
+                Directory.Delete(staging, recursive: true);
+            }
+            catch
+            {
+                // ignoreignore
+            }
+        }
     }
 }
