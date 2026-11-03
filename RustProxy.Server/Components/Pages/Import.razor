@@ -17,7 +17,7 @@
     {
         if (selectedFile is null) return;
         importing = true; failed = false; message = null;
-        try { await using var stream = selectedFile.OpenReadStream(1024L * 1024L * 1024L); var manifest = await Catalog.ImportAsync(stream, selectedFile.Name); message = $"Imported {manifest.Name} with {manifest.Files.Count} files."; selectedFile = null; }
+        try { await using var stream = selectedFile.OpenReadStream(1024L * 1024L * 1024L); var imported = await Catalog.ImportAsync(stream, selectedFile.Name); message = $"Imported package {imported.Id} with {imported.Manifest.Files.Count} files."; selectedFile = null; }
         catch (Exception exception) when (exception is InvalidDataException or IOException or ArgumentException) { failed = true; message = exception.Message; }
         finally { importing = false; }
     }
