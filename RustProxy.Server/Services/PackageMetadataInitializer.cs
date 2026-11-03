@@ -3,14 +3,14 @@ using RustProxy.Server.Entities;
 
 namespace RustProxy.Server.Services;
 
-/// <summary>Initializes the package metadata database schema.</summary>
-public sealed class PackageMetadataInitializer(ISqlSugarClient database) : IHostedService
+/// <summary>Initializes the package metadata database schema and removes stale records.</summary>
+public sealed class PackageMetadataInitializer(ISqlSugarClient database, PackageCatalog catalog) : IHostedService
 {
     /// <inheritdoc />
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         database.CodeFirst.InitTables<PackageMetadata, PackageCargoDependencyMetadata, PackageToolchainMetadata, PackageFileMetadata>();
-        return Task.CompletedTask;
+        await catalog.RemoveInvalidPackagesAsync(cancellationToken);
     }
 
     /// <inheritdoc />

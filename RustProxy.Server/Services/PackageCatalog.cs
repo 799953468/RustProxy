@@ -89,6 +89,55 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
         }
     }
 
+    /// <summary>Removes package metadata whose referenced files are missing or corrupted.</summary>
+    public async Task<int> RemoveInvalidPackagesAsync(CancellationToken cancellationToken = default)
+    {
+        if (!Directory.Exists(_root)) return 0;
+
+        var packages = database.Queryable<PackageMetadata>().ToList();
+        var removed = 0;
+        foreach (var package in packages)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var files = database.Queryable<PackageFileMetadata>().Where(file => file.PackageId == package.Id).ToList();
+            var valid = files.Count > 0;
+            foreach (var file in files)
+            {
+                string path;
+                try
+                {
+                    var relative = NormalizeAndValidatePath(file.Path);
+                    path = Path.GetFullPath(Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar)));
+                }
+                catch (InvalidDataException)
+                {
+                    valid = false;
+                    break;
+                }
+
+                if (!IsWithin(_root, path) || !File.Exists(path) ||
+                    !await HasChecksumAsync(path, new PackageFile { Length = file.Length, Sha256 = file.Sha256 }, cancellationToken))
+                {
+                    valid = false;
+                    break;
+                }
+            }
+
+            if (valid) continue;
+
+            using var transaction = database.Ado.UseTran();
+            database.Deleteable<PackageCargoDependencyMetadata>().Where(item => item.PackageId == package.Id).ExecuteCommand();
+            database.Deleteable<PackageToolchainMetadata>().Where(item => item.PackageId == package.Id).ExecuteCommand();
+            database.Deleteable<PackageFileMetadata>().Where(item => item.PackageId == package.Id).ExecuteCommand();
+            database.Deleteable<PackageMetadata>().Where(item => item.Id == package.Id).ExecuteCommand();
+            transaction.CommitTran();
+            removed++;
+        }
+
+        if (removed > 0) Interlocked.Increment(ref _cacheVersion);
+        return removed;
+    }
+
     /// <summary>Finds a source file in the shared Cargo or rustup tree.</summary>
     public async Task<string?> FindSourceFileAsync(string source, string? path, CancellationToken cancellationToken = default)
     {
