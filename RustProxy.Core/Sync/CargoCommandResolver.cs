@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using SharpCompress.Readers;
 using RustProxy.Core.Tools;
 
 namespace RustProxy.Core.Sync;
@@ -16,16 +17,34 @@ internal sealed class CargoCommandResolver(IFetchLogger logger)
     /// <summary>Generates Cargo.lock with system Cargo or a cached private Cargo.</summary>
     public async Task GenerateLockAsync(string projectDirectory, CancellationToken cancellationToken)
     {
-        var cargo = FindCargoOnPath();
-        if (cargo is not null)
+        var manifestPath = Path.Combine(projectDirectory, "Cargo.toml");
+        if (!File.Exists(manifestPath)) throw new FileNotFoundException("Cargo.toml is required to generate Cargo.lock.", manifestPath);
+        var cargoWorkspace = Path.Combine(Path.GetTempPath(), $"rustproxy-cargo-project-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(cargoWorkspace);
+        try
         {
-            logger.Info($"Cargo: using installed executable {cargo}");
-            await RunCargoAsync(cargo, projectDirectory, cancellationToken);
-            return;
-        }
+            File.Copy(manifestPath, Path.Combine(cargoWorkspace, "Cargo.toml"), true);
+            Directory.CreateDirectory(Path.Combine(cargoWorkspace, "src"));
+            await File.WriteAllTextAsync(Path.Combine(cargoWorkspace, "src", "main.rs"), "fn main() {}", cancellationToken);
+            var cargoConfig = Path.Combine(projectDirectory, ".cargo", "config.toml");
+            if (File.Exists(cargoConfig))
+            {
+                var configDirectory = Path.Combine(cargoWorkspace, ".cargo");
+                Directory.CreateDirectory(configDirectory);
+                File.Copy(cargoConfig, Path.Combine(configDirectory, "config.toml"), true);
+            }
 
-        cargo = await GetCachedCargoAsync("stable", cancellationToken);
-        await RunCargoAsync(cargo, projectDirectory, cancellationToken);
+            var cargo = FindCargoOnPath();
+            if (cargo is null) cargo = await GetCachedCargoAsync("stable", cancellationToken);
+            await RunCargoAsync(cargo, cargoWorkspace, cancellationToken);
+            var generatedLock = Path.Combine(cargoWorkspace, "Cargo.lock");
+            if (!File.Exists(generatedLock)) throw new InvalidDataException("Cargo completed successfully without generating Cargo.lock.");
+            File.Move(generatedLock, Path.Combine(projectDirectory, "Cargo.lock"), false);
+        }
+        finally
+        {
+            try { Directory.Delete(cargoWorkspace, true); } catch (IOException) { }
+        }
     }
 
     private async Task<string> GetCachedCargoAsync(string channel, CancellationToken cancellationToken)
@@ -117,13 +136,21 @@ internal sealed class CargoCommandResolver(IFetchLogger logger)
 
     private static async Task ExtractArchiveAsync(string archivePath, string destination, CancellationToken cancellationToken)
     {
-        var start = new ProcessStartInfo { FileName = "tar", WorkingDirectory = destination, UseShellExecute = false, RedirectStandardError = true, CreateNoWindow = true };
-        start.ArgumentList.Add("-xf");
-        start.ArgumentList.Add(archivePath);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start tar to extract the Cargo archive.");
-        var error = await process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-        if (process.ExitCode != 0) throw new InvalidOperationException($"Cargo archive extraction failed: {error.Trim()}");
+        Directory.CreateDirectory(destination);
+        await using var archiveStream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
+        using var reader = ReaderFactory.OpenReader(archiveStream);
+        while (reader.MoveToNextEntry())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var entry = reader.Entry ?? throw new InvalidDataException("Cargo archive contains an invalid entry.");
+            if (entry.IsDirectory) continue;
+            var entryKey = entry.Key ?? throw new InvalidDataException("Cargo archive contains an entry without a path.");
+            var outputPath = Path.GetFullPath(Path.Combine(destination, entryKey.Replace('/', Path.DirectorySeparatorChar)));
+            if (!outputPath.StartsWith(Path.GetFullPath(destination) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                throw new InvalidDataException($"Cargo archive contains an unsafe path: {entryKey}");
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            reader.WriteEntryToFile(outputPath, new SharpCompress.Common.ExtractionOptions { ExtractFullPath = true, Overwrite = true });
+        }
     }
 
     private static string? FindCargoOnPath()
@@ -149,6 +176,7 @@ internal sealed class CargoCommandResolver(IFetchLogger logger)
     {
         var start = new ProcessStartInfo { FileName = cargo, WorkingDirectory = projectDirectory, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         start.ArgumentList.Add("generate-lockfile");
+        start.Environment["CARGO_NET_OFFLINE"] = "false";
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Cargo.");
         var output = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var error = process.StandardError.ReadToEndAsync(cancellationToken);
