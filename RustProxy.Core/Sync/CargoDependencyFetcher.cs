@@ -27,7 +27,7 @@ public sealed partial class CargoDependencyFetcher(
     [GeneratedRegex("(?m)^checksum\\s*=\\s*\"(?<value>[a-fA-F0-9]{64})\"$")]
     private static partial Regex ChecksumPattern();
 
-    [GeneratedRegex("\\\\{(?<key>crate|version|prefix|lowerprefix|sha256-checksum)\\\\}")]
+    [GeneratedRegex("\\{(?<key>crate|version|prefix|lowerprefix|sha256-checksum)\\}")]
     private static partial Regex TemplatePattern();
 
     /// <summary>Downloads registry dependencies from Cargo.lock, generating a lockfile from Cargo.toml when absent.</summary>
