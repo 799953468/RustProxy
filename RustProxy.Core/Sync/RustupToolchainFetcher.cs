@@ -11,7 +11,7 @@ public sealed partial class RustupToolchainFetcher(
     RetryExecutor retryExecutor,
     IFetchLogger logger)
 {
-    [GeneratedRegex(@"^\[pkg\.(?<package>[^.\]]+)(?:\.target\.(?<target>[^\]]+))?\]$")]
+    [GeneratedRegex("""^\[pkg\.(?<package>[^.\]]+)(?:\.target\.(?:"(?<quotedTarget>[^"]+)"|(?<target>[^\]]+)))?\]$""")]
     private static partial Regex SectionPattern();
 
     [GeneratedRegex("^(?<kind>xz_)?url\\s*=\\s*\\\"(?<url>[^\\\"]+)\\\"$")]
@@ -20,10 +20,10 @@ public sealed partial class RustupToolchainFetcher(
     [GeneratedRegex("^(?<kind>xz_)?hash\\s*=\\s*\\\"(?<hash>[a-fA-F0-9]{64})\\\"$")]
     private static partial Regex HashPattern();
 
-    /// <summary>Downloads a channel manifest and selected target archives into a source directory.</summary>
+    /// <summary>Downloads a channel manifest, installer binaries, and target archives into a source directory.</summary>
     public async Task FetchToDirectoryAsync(string toolchain, string target, string destinationDirectory,
         Uri? source = null, int maxAttempts = 4, TimeSpan? retryDelay = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, IReadOnlyList<string>? rustupInitTargets = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(toolchain);
         ArgumentException.ThrowIfNullOrWhiteSpace(target);
@@ -34,6 +34,23 @@ public sealed partial class RustupToolchainFetcher(
             toolchain.Equals("nightly", StringComparison.OrdinalIgnoreCase)
                 ? toolchain.ToLowerInvariant()
                 : toolchain;
+        var outputRoot = Path.Combine(destinationDirectory, "rustup", "dist");
+        Directory.CreateDirectory(outputRoot);
+
+        await FetchFileAsync(new Uri(baseUri, $"../rustup/release-{channel}.toml"),
+            Path.Combine(destinationDirectory, "rustup", $"release-{channel}.toml"),
+            $"release-{channel}.toml", null, maxAttempts, retryDelay, cancellationToken);
+
+        var installerTargets = (rustupInitTargets ?? [target]).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        foreach (var installerTarget in installerTargets)
+        {
+            var installerName = installerTarget.Contains("windows", StringComparison.OrdinalIgnoreCase) ? "rustup-init.exe" : "rustup-init";
+            var installerPath = $"../rustup/dist/{installerTarget}/{installerName}";
+            await FetchFileAsync(new Uri(baseUri, installerPath),
+                Path.Combine(destinationDirectory, "rustup", "dist", installerTarget, installerName),
+                installerPath, null, maxAttempts, retryDelay, cancellationToken);
+        }
+
         var manifestPath = $"channel-rust-{channel}.toml";
         logger.Info($"rustup: downloading channel manifest {manifestPath}");
         var manifestText = await retryExecutor.ExecuteAsync(manifestPath, async () =>
@@ -89,6 +106,30 @@ public sealed partial class RustupToolchainFetcher(
         }
     }
 
+    private async Task FetchFileAsync(Uri uri, string targetPath, string relativePath, string? expectedHash,
+        int maxAttempts, TimeSpan? retryDelay, CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        logger.Info($"rustup: downloading {relativePath}");
+        await retryExecutor.ExecuteAsync(relativePath, async () =>
+        {
+            using var response = await httpClient.GetAsync(uri, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, true);
+            await input.CopyToAsync(output, cancellationToken);
+            await output.FlushAsync(cancellationToken);
+            if (expectedHash is not null)
+            {
+                output.Close();
+                await using var hashStream = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
+                var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(hashStream, cancellationToken)).ToLowerInvariant();
+                if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) throw new IOException($"SHA-256 mismatch for {relativePath}");
+            }
+            return true;
+        }, maxAttempts, retryDelay ?? TimeSpan.FromSeconds(3), cancellationToken);
+    }
+
     private static ArchiveReference[] ParseSelectedArchives(string manifest, string target)
     {
         var selected = new Dictionary<string, (string Url, string? Hash, bool Compressed)>(StringComparer.OrdinalIgnoreCase);
@@ -105,7 +146,9 @@ public sealed partial class RustupToolchainFetcher(
             {
                 SaveCandidate();
                 package = section.Groups["package"].Value;
-                sectionTarget = section.Groups["target"].Success ? section.Groups["target"].Value : null;
+                sectionTarget = section.Groups["quotedTarget"].Success
+                    ? section.Groups["quotedTarget"].Value
+                    : section.Groups["target"].Success ? section.Groups["target"].Value : null;
                 url = null;
                 hash = null;
                 compressed = false;
@@ -135,7 +178,9 @@ public sealed partial class RustupToolchainFetcher(
         void SaveCandidate()
         {
             if (string.IsNullOrWhiteSpace(package) || string.IsNullOrWhiteSpace(url)) return;
-            var targetSelected = sectionTarget is null || sectionTarget.Equals(target, StringComparison.OrdinalIgnoreCase);
+            var targetSelected = sectionTarget is null ||
+                sectionTarget.Equals(target, StringComparison.OrdinalIgnoreCase) ||
+                package.Equals("rust-src", StringComparison.OrdinalIgnoreCase) && sectionTarget is "*" or null;
             if (!targetSelected) return;
             var key = $"{package}:{sectionTarget}";
             if (!selected.TryGetValue(key, out var existing) || compressed && !existing.Compressed)

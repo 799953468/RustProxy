@@ -20,15 +20,16 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
     public async Task<IReadOnlyList<PackageManifest>> ListAsync(CancellationToken cancellationToken = default)
     {
         var key = $"catalog:list:{Volatile.Read(ref _cacheVersion)}";
-        return await cache.GetOrCreateAsync(key, entry =>
+        var manifests = await cache.GetOrCreateAsync<IReadOnlyList<PackageManifest>>(key, async entry =>
         {
             entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(30);
-            return Task.FromResult<IReadOnlyList<PackageManifest>>(database.Queryable<PackageMetadata>()
-                .ToList()
-                .Select(metadata => BuildManifest(metadata.Id, metadata))
+            var metadata = await database.Queryable<PackageMetadata>().ToListAsync(cancellationToken);
+            return metadata
+                .Select(item => BuildManifest(item.Id, item))
                 .OrderByDescending(x => x.CreatedAt)
-                .ToArray());
-        }) ?? [];
+                .ToArray();
+        });
+        return manifests ?? [];
     }
 
     /// <summary>Finds a stored package manifest by its database identifier.</summary>
@@ -36,7 +37,7 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
     {
         var key = $"catalog:manifest:{id}";
         if (cache.TryGetValue<PackageManifest?>(key, out var cached)) return cached;
-        var metadata = database.Queryable<PackageMetadata>().First(x => x.Id == id);
+        var metadata = await database.Queryable<PackageMetadata>().FirstAsync(x => x.Id == id, cancellationToken);
         var manifest = metadata is null ? null : BuildManifest(id, metadata);
         cache.Set(key, manifest, TimeSpan.FromSeconds(30));
         return manifest;
@@ -58,33 +59,73 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
             await PackageStore.ImportAsync(new ImportOptions { PackagePath = temporary, DestinationDirectory = staging }, cancellationToken);
             Directory.CreateDirectory(_root);
             var files = manifest.Files.Select(file => (ManifestFile: file, Relative: NormalizeAndValidatePath(file.Path))).ToArray();
-            foreach (var (file, relative) in files)
-            {
-                var targetPath = Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar));
-                if (File.Exists(targetPath) && !await HasChecksumAsync(targetPath, file, cancellationToken)) throw new InvalidDataException($"Conflicting file already exists: {relative}");
-            }
             foreach (var (_, relative) in files)
             {
                 var sourcePath = Path.Combine(staging, relative.Replace('/', Path.DirectorySeparatorChar));
                 var targetPath = Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar));
-                if (File.Exists(targetPath)) continue;
                 Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-                File.Copy(sourcePath, targetPath);
+                File.Copy(sourcePath, targetPath, overwrite: true);
             }
-            var metadata = new PackageMetadata { Id = SnowFlakeSingle.Instance.NextId(), FormatVersion = manifest.FormatVersion, Name = manifest.Name, CreatedAt = manifest.CreatedAt, Source = manifest.Source };
+
+            var metadata = new PackageMetadata
+            {
+                Id = SnowFlakeSingle.Instance.NextId(),
+                FormatVersion = manifest.FormatVersion,
+                Name = manifest.Name,
+                CreatedAt = manifest.CreatedAt,
+                Source = manifest.Source
+            };
             using var transaction = database.Ado.UseTran();
-            database.Insertable(metadata).ExecuteCommand();
-            database.Insertable(manifest.CargoDependencies.Select(x => new PackageCargoDependencyMetadata { Id = SnowFlakeSingle.Instance.NextId(), PackageId = metadata.Id, Name = x.Name, Version = x.Version, Checksum = x.Checksum }).ToList()).ExecuteCommand();
-            database.Insertable(manifest.Toolchains.Select(x => new PackageToolchainMetadata { Id = SnowFlakeSingle.Instance.NextId(), PackageId = metadata.Id, Version = x.Version, Target = x.Target }).ToList()).ExecuteCommand();
-            database.Insertable(manifest.Files.Select(x => new PackageFileMetadata { Id = SnowFlakeSingle.Instance.NextId(), PackageId = metadata.Id, Path = x.Path, Length = x.Length, Sha256 = x.Sha256 }).ToList()).ExecuteCommand();
+            await database.Insertable(metadata).ExecuteCommandAsync(cancellationToken);
+            await database.Insertable(manifest.CargoDependencies.Select(x => new PackageCargoDependencyMetadata
+                {
+                    Id = SnowFlakeSingle.Instance.NextId(),
+                    PackageId = metadata.Id,
+                    Name = x.Name,
+                    Version = x.Version,
+                    Checksum = x.Checksum }).ToList())
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Insertable(manifest.Toolchains
+                    .Select(x => new PackageToolchainMetadata
+                    {
+                        Id = SnowFlakeSingle.Instance.NextId(),
+                        PackageId = metadata.Id,
+                        Version = x.Version,
+                        Target = x.Target
+                    }).ToList())
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Insertable(manifest.Files.Select(x => new PackageFileMetadata
+                    {
+                        Id = SnowFlakeSingle.Instance.NextId(),
+                        PackageId = metadata.Id,
+                        Path = x.Path,
+                        Length = x.Length,
+                        Sha256 = x.Sha256
+                    })
+                    .ToList())
+                .ExecuteCommandAsync(cancellationToken);
             transaction.CommitTran();
             Interlocked.Increment(ref _cacheVersion);
             return (metadata.Id, manifest);
         }
         finally
         {
-            try { File.Delete(temporary); } catch { }
-            try { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); } catch { }
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            }
+            catch
+            {
+            }
+
             ImportLock.Release();
         }
     }
@@ -94,12 +135,14 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
     {
         if (!Directory.Exists(_root)) return 0;
 
-        var packages = database.Queryable<PackageMetadata>().ToList();
+        var packages = await database.Queryable<PackageMetadata>().ToListAsync(cancellationToken);
         var removed = 0;
         foreach (var package in packages)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var files = database.Queryable<PackageFileMetadata>().Where(file => file.PackageId == package.Id).ToList();
+            var files = await database.Queryable<PackageFileMetadata>()
+                .Where(file => file.PackageId == package.Id)
+                .ToListAsync(cancellationToken);
             var valid = files.Count > 0;
             foreach (var file in files)
             {
@@ -126,10 +169,14 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
             if (valid) continue;
 
             using var transaction = database.Ado.UseTran();
-            database.Deleteable<PackageCargoDependencyMetadata>().Where(item => item.PackageId == package.Id).ExecuteCommand();
-            database.Deleteable<PackageToolchainMetadata>().Where(item => item.PackageId == package.Id).ExecuteCommand();
-            database.Deleteable<PackageFileMetadata>().Where(item => item.PackageId == package.Id).ExecuteCommand();
-            database.Deleteable<PackageMetadata>().Where(item => item.Id == package.Id).ExecuteCommand();
+            await database.Deleteable<PackageCargoDependencyMetadata>().Where(item => item.PackageId == package.Id)
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Deleteable<PackageToolchainMetadata>().Where(item => item.PackageId == package.Id)
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Deleteable<PackageFileMetadata>().Where(item => item.PackageId == package.Id)
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Deleteable<PackageMetadata>().Where(item => item.Id == package.Id)
+                .ExecuteCommandAsync(cancellationToken);
             transaction.CommitTran();
             removed++;
         }
@@ -178,6 +225,7 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
             await File.WriteAllTextAsync(manifestPath, JsonSerializer.Serialize(manifest, RustProxyJsonContext.Default.PackageManifest));
             return manifestPath;
         }
+
         var normalized = NormalizeAndValidatePath(path ?? string.Empty);
         var fullPath = Path.GetFullPath(Path.Combine(_root, normalized.Replace('/', Path.DirectorySeparatorChar)));
         return IsWithin(_root, fullPath) && File.Exists(fullPath) ? fullPath : null;
@@ -189,9 +237,18 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
         Name = metadata.Name,
         CreatedAt = metadata.CreatedAt,
         Source = metadata.Source,
-        CargoDependencies = database.Queryable<PackageCargoDependencyMetadata>().Where(x => x.PackageId == id).ToList().Select(x => new CargoDependencyInfo { Name = x.Name, Version = x.Version, Checksum = x.Checksum }).ToList(),
-        Toolchains = database.Queryable<PackageToolchainMetadata>().Where(x => x.PackageId == id).ToList().Select(x => new RustToolchainInfo { Version = x.Version, Target = x.Target }).ToList(),
-        Files = database.Queryable<PackageFileMetadata>().Where(x => x.PackageId == id).ToList().Select(x => new PackageFile { Path = x.Path, Length = x.Length, Sha256 = x.Sha256 }).ToList()
+        CargoDependencies = database.Queryable<PackageCargoDependencyMetadata>()
+            .Where(x => x.PackageId == id)
+            .Select(x => new CargoDependencyInfo { Name = x.Name, Version = x.Version, Checksum = x.Checksum })
+            .ToList(),
+        Toolchains = database.Queryable<PackageToolchainMetadata>()
+            .Where(x => x.PackageId == id)
+            .Select(x => new RustToolchainInfo { Version = x.Version, Target = x.Target })
+            .ToList(),
+        Files = database.Queryable<PackageFileMetadata>()
+            .Where(x => x.PackageId == id)
+            .Select(x => new PackageFile { Path = x.Path, Length = x.Length, Sha256 = x.Sha256 })
+            .ToList()
     };
 
     private static async Task<bool> HasChecksumAsync(string path, PackageFile file, CancellationToken cancellationToken)
@@ -207,7 +264,8 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
     private static string NormalizeAndValidatePath(string path)
     {
         var normalized = path.Replace('\\', '/').TrimStart('/');
-        if (string.IsNullOrWhiteSpace(normalized) || normalized.Contains("../", StringComparison.Ordinal) || normalized.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(normalized)) throw new InvalidDataException($"Unsafe package path: {path}");
+        if (string.IsNullOrWhiteSpace(normalized) || normalized.Contains("../", StringComparison.Ordinal) || normalized.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(normalized))
+            throw new InvalidDataException($"Unsafe package path: {path}");
         return normalized;
     }
 

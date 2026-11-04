@@ -25,7 +25,16 @@ public sealed class FetchConfiguration
     /// <summary>Gets or sets rustup toolchain definitions.</summary>
     public List<ToolchainConfiguration> Toolchains { get; set; } = [];
 
-    /// <summary>Gets or sets the maximum attempts for retryable operations.</summary>
+    /// <summary>Gets or sets rustup-init host targets to cache for client installation.</summary>
+    public List<string> RustupInitTargets { get; set; } =
+    [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc"
+    ];
+
     [Range(1, 20)]
     public int RetryCount { get; set; } = 4;
 

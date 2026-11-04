@@ -36,7 +36,8 @@ public sealed class FetchCoordinator(
                 await rustupFetcher.FetchToDirectoryAsync(toolchain.Version, toolchain.Target, root,
                     maxAttempts: configuration.RetryCount,
                     retryDelay: TimeSpan.FromSeconds(configuration.RetryDelaySeconds),
-                    cancellationToken: cancellationToken);
+                    cancellationToken: cancellationToken,
+                    rustupInitTargets: configuration.RustupInitTargets);
                 metadata.Toolchains.Add(new RustToolchainInfo { Version = toolchain.Version, Target = toolchain.Target });
                 logger.Info($"rustup: {toolchain.Version}/{toolchain.Target} fetched");
             }
