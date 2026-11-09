@@ -1,5 +1,14 @@
 image: mcr.microsoft.com/dotnet/sdk:11.0.100-rc.3
 
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+    - when: never
+
 stages:
   - verify
   - package
@@ -20,12 +29,21 @@ cache:
 
 verify:
   stage: verify
+  timeout: 30m
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH || $CI_COMMIT_TAG'
   script:
     - dotnet --info
-    - dotnet restore RustProxy.slnx --locked-mode
-    - dotnet build RustProxy.slnx --configuration Release --no-restore
-    - dotnet test RustProxy.slnx --configuration Release --no-build --no-restore
+    - dotnet restore RustProxy.slnx --locked-mode --disable-build-servers
+    - dotnet build RustProxy.slnx --configuration Release --no-restore --disable-build-servers -m:1 -p:UseSharedCompilation=false
+    - dotnet test RustProxy.slnx --configuration Release --no-build --no-restore --disable-build-servers --logger "trx;LogFilePrefix=tests" --results-directory TestResults
     - git diff --check
+  artifacts:
+    when: always
+    paths:
+      - TestResults/**/*.trx
+    expire_in: 14 days
 
 publish:
   stage: package
@@ -41,6 +59,9 @@ publish:
     - if: '$CI_COMMIT_TAG =~ /^v/'
       variables:
         PACKAGE_VERSION: "$CI_COMMIT_TAG"
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      variables:
+        PACKAGE_VERSION: "$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
     - if: '$CI_COMMIT_BRANCH'
       variables:
         PACKAGE_VERSION: "$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
