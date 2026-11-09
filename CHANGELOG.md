@@ -4,14 +4,15 @@
 
 ### Changes
 
-- Include the security, storage recovery, Cargo/rustup synchronization, and CI improvements described in v0.1.2 below.
+- Ship hardened package validation, immutable checksum-addressed storage, import recovery, authenticated administration, and corrected Cargo/rustup synchronization.
 - Normalize test workspace paths with the operating system's path rules, fixing Windows failures in the legacy database migration and relative TOML configuration tests.
 - Remove the unsupported `include-prerelease` input from GitHub SDK setup; `global.json` continues to select the pinned .NET 11 RC3 SDK.
 
 ### Release and upgrade notes
 
-- GitHub publication of v0.1.2 was blocked by the Windows test fixture path assertions; v0.1.3 fixes that release gate without replacing the existing tag.
-- The v0.1.2 administrator configuration, data migration, four-platform downloads, and .NET 11 RC3 runtime requirements also apply to this version.
+- Set `Administration__ApiKey` to a secret of at least 32 characters to enable imports, and use HTTPS for remote administration.
+- Back up existing data before upgrading and run one server per data directory while legacy metadata and verified files migrate into private storage.
+- Downloads contain the server and CLI for `linux-x64`, `linux-arm64`, `win-x64`, and `osx-arm64`, with SHA-256 checksum files. Install the matching .NET 11 RC3 runtime; packages are framework-dependent.
 
 ## v0.1.2
 
