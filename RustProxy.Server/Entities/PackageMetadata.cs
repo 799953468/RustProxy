@@ -19,14 +19,16 @@ public sealed class PackageMetadata
     public string Name { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the package creation time in UTC.</summary>
-    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     /// <summary>Gets or sets the source URL used to build the package.</summary>
+    [SugarColumn(IsNullable = true)]
     public string? Source { get; set; }
 }
 
 /// <summary>Stores a Cargo dependency belonging to a package.</summary>
 [SugarTable("PackageCargoDependencies")]
+[SugarIndex("IX_CargoDependencies_PackageId", nameof(PackageId), OrderByType.Asc)]
 public sealed class PackageCargoDependencyMetadata
 {
     /// <summary>Gets or sets the database-generated row identifier.</summary>
@@ -43,11 +45,13 @@ public sealed class PackageCargoDependencyMetadata
     public string Version { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the registry checksum.</summary>
+    [SugarColumn(IsNullable = true)]
     public string? Checksum { get; set; }
 }
 
 /// <summary>Stores a Rust toolchain belonging to a package.</summary>
 [SugarTable("PackageToolchains")]
+[SugarIndex("IX_Toolchains_PackageId", nameof(PackageId), OrderByType.Asc)]
 public sealed class PackageToolchainMetadata
 {
     /// <summary>Gets or sets the database-generated row identifier.</summary>
@@ -66,6 +70,8 @@ public sealed class PackageToolchainMetadata
 
 /// <summary>Stores a file entry belonging to a package.</summary>
 [SugarTable("PackageFiles")]
+[SugarIndex("IX_PackageFiles_PackagePath", nameof(PackageId), OrderByType.Asc, nameof(Path), OrderByType.Asc)]
+[SugarIndex("IX_PackageFiles_PathPackage", nameof(Path), OrderByType.Asc, nameof(PackageId), OrderByType.Desc)]
 public sealed class PackageFileMetadata
 {
     /// <summary>Gets or sets the database-generated row identifier.</summary>

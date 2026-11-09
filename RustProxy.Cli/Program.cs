@@ -6,7 +6,9 @@ using RustProxy.Core.Storage;
 using RustProxy.Core.Sync;
 using RustProxy.Core.Tools;
 
-var cancellationToken = CancellationToken.None;
+using var lifetime = new CancellationTokenSource();
+Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; lifetime.Cancel(); };
+var cancellationToken = lifetime.Token;
 if (args.Length == 0)
 {
     PrintUsage();
@@ -53,7 +55,12 @@ try
             throw new ArgumentException($"Unknown command: {args[0]}");
     }
 }
-catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or UriFormatException or HttpRequestException)
+catch (OperationCanceledException)
+{
+    Console.Error.WriteLine("Operation cancelled or timed out.");
+    return 130;
+}
+catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or UriFormatException or HttpRequestException or InvalidOperationException or UnauthorizedAccessException)
 {
     Console.Error.WriteLine($"Error: {exception.Message}");
     return 2;

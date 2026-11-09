@@ -89,6 +89,8 @@ public sealed class SourceDownloadOptions
 /// <summary>Options for importing packages into a source directory.</summary>
 public sealed class ImportOptions
 {
+    /// <summary>Gets the extraction quotas.</summary>
+    public PackageLimits Limits { get; init; } = new();
     /// <summary>Gets or sets the package file.</summary>
     [Required]
     public required string PackagePath { get; init; }

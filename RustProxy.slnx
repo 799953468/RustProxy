@@ -2,4 +2,5 @@
   <Project Path="RustProxy.Cli/RustProxy.Cli.csproj" />
   <Project Path="RustProxy.Core/RustProxy.Core.csproj" />
   <Project Path="RustProxy.Server/RustProxy.Server.csproj" />
+  <Project Path="tests/RustProxy.Tests/RustProxy.Tests.csproj" />
 </Solution>

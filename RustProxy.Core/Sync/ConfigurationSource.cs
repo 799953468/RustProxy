@@ -1,226 +1,121 @@
+using System.Text.Json;
+using Tomlyn;
+using Tomlyn.Model;
+using RustProxy.Core.Serialization;
+
 namespace RustProxy.Core.Sync;
 
-/// <summary>Represents a configuration source that can be converted to FetchConfiguration.</summary>
+/// <summary>Loads a supported fetch configuration format.</summary>
 public interface IConfigurationSource
 {
-    /// <summary>Attempts to load and convert the configuration.</summary>
-    /// <returns>A FetchConfiguration if successful, null otherwise.</returns>
+    /// <summary>Returns null only when the source does not handle this filename.</summary>
     Task<FetchConfiguration?> TryLoadAsync(string path, string baseDirectory, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Configuration source for standard JSON format.</summary>
+/// <summary>Loads strict JSON configurations, preserving actionable parse errors.</summary>
 public sealed class JsonConfigurationSource : IConfigurationSource
 {
+    /// <inheritdoc />
     public async Task<FetchConfiguration?> TryLoadAsync(string path, string baseDirectory, CancellationToken cancellationToken = default)
     {
-        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        if (!File.Exists(path))
-            return null;
-
-        try
-        {
-            var json = await File.ReadAllTextAsync(path, cancellationToken);
-            var config = System.Text.Json.JsonSerializer.Deserialize(
-                json,
-                Serialization.RustProxyJsonContext.Default.FetchConfiguration);
-
-            if (config != null)
-            {
-                // Resolve relative paths
-                if (!Path.IsPathRooted(config.Output))
-                    config.Output = Path.Combine(baseDirectory, config.Output);
-                if (!string.IsNullOrWhiteSpace(config.CargoProject) && !Path.IsPathRooted(config.CargoProject))
-                    config.CargoProject = Path.Combine(baseDirectory, config.CargoProject);
-            }
-
-            return config;
-        }
-        catch
-        {
-            return null;
-        }
+        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return null;
+        await using var input = File.OpenRead(path);
+        try { return await JsonSerializer.DeserializeAsync(input, RustProxyJsonContext.Default.FetchConfiguration, cancellationToken) ?? throw new InvalidDataException("Configuration is empty."); }
+        catch (JsonException exception) { throw new InvalidDataException($"Invalid JSON configuration {path}: {exception.Message}", exception); }
     }
 }
 
-/// <summary>Configuration source for TOML format.</summary>
+/// <summary>Loads TOML configurations with complete TOML syntax support.</summary>
 public sealed class TomlConfigurationSource : IConfigurationSource
 {
+    /// <inheritdoc />
     public async Task<FetchConfiguration?> TryLoadAsync(string path, string baseDirectory, CancellationToken cancellationToken = default)
     {
-        if (!path.EndsWith(".toml", StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        if (!File.Exists(path))
-            return null;
-
-        try
-        {
-            var tomlContent = await File.ReadAllTextAsync(path, cancellationToken);
-            var config = ParseTomlConfiguration(tomlContent, baseDirectory);
-            return config;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static FetchConfiguration? ParseTomlConfiguration(string tomlContent, string baseDirectory)
-    {
+        if (!path.EndsWith(".toml", StringComparison.OrdinalIgnoreCase) || Path.GetFileName(path).Equals("Cargo.toml", StringComparison.OrdinalIgnoreCase)) return null;
+        var document = Toml.Parse(await File.ReadAllTextAsync(path, cancellationToken));
+        if (document.HasErrors) throw new InvalidDataException($"Invalid TOML configuration {path}: {document.Diagnostics}");
+        var table = document.ToModel();
         var config = new FetchConfiguration();
-        var lines = tomlContent.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-        var inToolchainTable = false;
-        var currentToolchain = new ToolchainConfiguration();
-
-        foreach (var line in lines)
+        foreach (var item in table)
         {
-            var trimmedLine = line.Trim();
-            if (string.IsNullOrWhiteSpace(trimmedLine) || trimmedLine.StartsWith('#'))
-                continue;
-
-            if (trimmedLine == "[[toolchains]]")
+            switch (item.Key)
             {
-                if (inToolchainTable && !string.IsNullOrWhiteSpace(currentToolchain.Target))
-                    config.Toolchains.Add(currentToolchain);
-                currentToolchain = new ToolchainConfiguration();
-                inToolchainTable = true;
-                continue;
-            }
-
-            if (trimmedLine.StartsWith('[') && trimmedLine.EndsWith(']'))
-            {
-                inToolchainTable = false;
-                continue;
-            }
-
-            if (trimmedLine.StartsWith("toolchains") && trimmedLine.Contains('='))
-            {
-                var valueStart = trimmedLine.IndexOf('=') + 1;
-                var value = trimmedLine[valueStart..].Trim();
-                if (value.StartsWith('[') && value.EndsWith(']'))
-                {
-                    var toolchainStrings = value[1..^1].Split(',');
-                    foreach (var toolchainStr in toolchainStrings)
+                case "name": config.Name = Text(item.Value, item.Key); break;
+                case "output": config.Output = Text(item.Value, item.Key); break;
+                case "cargo-project": case "cargoProject": config.CargoProject = Text(item.Value, item.Key); break;
+                case "cargo-index-url": case "cargoIndexUrl": config.CargoIndexUrl = Text(item.Value, item.Key); break;
+                case "cargo-download-url": case "cargoDownloadUrl": config.CargoDownloadUrl = Text(item.Value, item.Key); break;
+                case "retry-count": case "retryCount": config.RetryCount = Integer(item.Value, item.Key); break;
+                case "retry-delay-seconds": case "retryDelaySeconds": config.RetryDelaySeconds = Integer(item.Value, item.Key); break;
+                case "max-concurrent-downloads": case "maxConcurrentDownloads": config.MaxConcurrentDownloads = Integer(item.Value, item.Key); break;
+                case "rustup-init-targets": case "rustupInitTargets":
+                    if (item.Value is not TomlArray targets) throw new InvalidDataException("rustupInitTargets must be an array.");
+                    config.RustupInitTargets = targets.Select(x => Text(x, item.Key)).ToList();
+                    break;
+                case "toolchains":
+                    if (item.Value is TomlTableArray tables)
                     {
-                        var parts = toolchainStr.Trim().Trim('"').Split('/');
-                        if (parts.Length == 2)
+                        foreach (var entry in tables)
                         {
-                            config.Toolchains.Add(new ToolchainConfiguration
-                            {
-                                Version = parts[0].Trim(),
-                                Target = parts[1].Trim()
-                            });
+                            if (!entry.TryGetValue("version", out var version) || !entry.TryGetValue("target", out var target)) throw new InvalidDataException("Each toolchain needs version and target.");
+                            if (entry.Keys.Any(x => x is not ("version" or "target"))) throw new InvalidDataException("Unknown toolchain setting.");
+                            config.Toolchains.Add(new ToolchainConfiguration { Version = Text(version, "version"), Target = Text(target, "target") });
                         }
                     }
-                }
-            }
-            else if (inToolchainTable)
-            {
-                if (trimmedLine.StartsWith("version"))
-                    currentToolchain.Version = ExtractTomlValue(trimmedLine);
-                else if (trimmedLine.StartsWith("target"))
-                    currentToolchain.Target = ExtractTomlValue(trimmedLine);
-            }
-            else
-            {
-                if (trimmedLine.StartsWith("name"))
-                    config.Name = ExtractTomlValue(trimmedLine);
-                else if (trimmedLine.StartsWith("output"))
-                    config.Output = ExtractTomlValue(trimmedLine);
-                else if (trimmedLine.StartsWith("cargo-project") || trimmedLine.StartsWith("cargoProject"))
-                    config.CargoProject = ExtractTomlValue(trimmedLine);
-                else if (trimmedLine.StartsWith("cargo-index-url") || trimmedLine.StartsWith("cargoIndexUrl"))
-                    config.CargoIndexUrl = ExtractTomlValue(trimmedLine);
-                else if (trimmedLine.StartsWith("cargo-download-url") || trimmedLine.StartsWith("cargoDownloadUrl"))
-                    config.CargoDownloadUrl = ExtractTomlValue(trimmedLine);
-                else if (trimmedLine.StartsWith("retry-count") || trimmedLine.StartsWith("retryCount"))
-                {
-                    if (int.TryParse(ExtractTomlValue(trimmedLine), out var retryCount))
-                        config.RetryCount = retryCount;
-                }
-                else if (trimmedLine.StartsWith("retry-delay-seconds") || trimmedLine.StartsWith("retryDelaySeconds"))
-                {
-                    if (int.TryParse(ExtractTomlValue(trimmedLine), out var retryDelay))
-                        config.RetryDelaySeconds = retryDelay;
-                }
+                    else if (item.Value is TomlArray toolchains)
+                    {
+                        foreach (var entry in toolchains)
+                        {
+                            var parts = Text(entry, "toolchains").Split('/');
+                            if (parts.Length != 2) throw new InvalidDataException("Use version/target toolchain entries.");
+                            config.Toolchains.Add(new ToolchainConfiguration { Version = parts[0], Target = parts[1] });
+                        }
+                    }
+                    else throw new InvalidDataException("toolchains must be an array.");
+                    break;
+                default: throw new InvalidDataException($"Unknown fetch setting: {item.Key}");
             }
         }
-
-        if (inToolchainTable && !string.IsNullOrWhiteSpace(currentToolchain.Target))
-            config.Toolchains.Add(currentToolchain);
-
         return config;
     }
 
-    private static string ExtractTomlValue(string line)
-    {
-        var eqIndex = line.IndexOf('=');
-        if (eqIndex < 0)
-            return string.Empty;
-
-        var value = line[(eqIndex + 1)..].Trim();
-        if (value.StartsWith('"') && value.EndsWith('"'))
-            return value[1..^1];
-        if (value.StartsWith('\'') && value.EndsWith('\''))
-            return value[1..^1];
-        return value;
-    }
+    private static string Text(object? value, string key) => value as string ?? throw new InvalidDataException($"{key} must be a string.");
+    private static int Integer(object value, string key) => value is long number && number is >= int.MinValue and <= int.MaxValue ? (int)number : throw new InvalidDataException($"{key} must be an integer.");
 }
 
-/// <summary>Configuration source for Cargo.toml files (extracts project path).</summary>
+/// <summary>Converts Cargo.toml into a configuration referencing its real project directory.</summary>
 public sealed class CargoTomlConfigurationSource : IConfigurationSource
 {
-    public async Task<FetchConfiguration?> TryLoadAsync(string path, string baseDirectory, CancellationToken cancellationToken = default)
+    /// <inheritdoc />
+    public Task<FetchConfiguration?> TryLoadAsync(string path, string baseDirectory, CancellationToken cancellationToken = default)
     {
-        if (!Path.GetFileName(path).Equals("Cargo.toml", StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        if (!File.Exists(path))
-            return null;
-
-        try
-        {
-            var projectDir = Path.GetDirectoryName(path)!;
-            var config = new FetchConfiguration
-            {
-                Name = Path.GetFileName(projectDir) ?? "offline-rust",
-                Output = Path.Combine(baseDirectory, $"{Path.GetFileName(projectDir) ?? "offline-rust"}.rpk"),
-                CargoProject = projectDir
-            };
-            return config;
-        }
-        catch
-        {
-            return null;
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!Path.GetFileName(path).Equals("Cargo.toml", StringComparison.OrdinalIgnoreCase)) return Task.FromResult<FetchConfiguration?>(null);
+        if (!File.Exists(path)) throw new FileNotFoundException("Cargo.toml was not found.", path);
+        var directory = Path.GetDirectoryName(path)!;
+        return Task.FromResult<FetchConfiguration?>(new FetchConfiguration { Name = Path.GetFileName(directory), CargoProject = directory, Output = Path.Combine(baseDirectory, Path.GetFileName(directory) + ".rpk") });
     }
 }
 
-/// <summary>Converter that detects and loads configuration from various sources.</summary>
-public sealed class ConfigurationConverter
+/// <summary>Detects configuration formats and normalizes every source consistently.</summary>
+public static class ConfigurationConverter
 {
-    private static readonly IConfigurationSource[] Sources =
-    [
-        new JsonConfigurationSource(),
-        new TomlConfigurationSource(),
-        new CargoTomlConfigurationSource()
-    ];
+    private static readonly IConfigurationSource[] Sources = [new CargoTomlConfigurationSource(), new JsonConfigurationSource(), new TomlConfigurationSource()];
 
-    /// <summary>Attempts to load and convert configuration from a file, detecting the format automatically.</summary>
+    /// <summary>Loads, validates and resolves paths relative to the supplied configuration file.</summary>
     public static async Task<FetchConfiguration> ConvertAsync(string configPath, CancellationToken cancellationToken = default)
     {
         var fullPath = Path.GetFullPath(configPath);
-        var baseDirectory = Path.GetDirectoryName(fullPath)!;
-
+        var directory = Path.GetDirectoryName(fullPath)!;
         foreach (var source in Sources)
         {
-            var config = await source.TryLoadAsync(fullPath, baseDirectory, cancellationToken);
-            if (config != null)
-                return config;
+            var config = await source.TryLoadAsync(fullPath, directory, cancellationToken);
+            if (config is null) continue;
+            config.Validate();
+            config.Output = Path.GetFullPath(config.Output, directory);
+            if (!string.IsNullOrWhiteSpace(config.CargoProject)) config.CargoProject = Path.GetFullPath(config.CargoProject, directory);
+            return config;
         }
-
-        throw new InvalidDataException($"Unable to load configuration from {configPath}. Supported formats: JSON (.json), TOML (.toml), or Cargo.toml");
+        throw new InvalidDataException($"Unsupported configuration: {configPath}. Use JSON, TOML or Cargo.toml.");
     }
 }

@@ -14,6 +14,7 @@ public sealed class FetchCoordinator(
     public async Task FetchAsync(FetchConfiguration configuration, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(configuration);
+        configuration.Validate();
         if (string.IsNullOrWhiteSpace(configuration.CargoProject) && configuration.Toolchains.Count == 0)
             throw new ArgumentException("Configure CargoProject or at least one toolchain.", nameof(configuration));
         var root = Path.Combine(Path.GetTempPath(), $"rustproxy-fetch-{Guid.NewGuid():N}");
@@ -25,7 +26,7 @@ public sealed class FetchCoordinator(
             {
                 logger.Info($"Cargo: fetching locked dependencies from {configuration.CargoProject}");
                 var cargoDependencies = await cargoFetcher.FetchAsync(configuration.CargoProject, root, configuration.CargoIndexUrl, configuration.CargoDownloadUrl, configuration.RetryCount,
-                    TimeSpan.FromSeconds(configuration.RetryDelaySeconds), cancellationToken);
+                    TimeSpan.FromSeconds(configuration.RetryDelaySeconds), cancellationToken, configuration.MaxConcurrentDownloads);
                 metadata.CargoDependencies.AddRange(cargoDependencies);
                 logger.Info($"Cargo: {metadata.CargoDependencies.Count} dependencies fetched");
             }
@@ -42,24 +43,13 @@ public sealed class FetchCoordinator(
                 logger.Info($"rustup: {toolchain.Version}/{toolchain.Target} fetched");
             }
 
-            foreach (var manifest in Directory.EnumerateFiles(root, "manifest.json", SearchOption.AllDirectories))
-                File.Delete(manifest);
-            foreach (var package in Directory.EnumerateFiles(root, "*.rpk", SearchOption.TopDirectoryOnly))
-                File.Delete(package);
             logger.Info($"Creating package {configuration.Output}");
             await PackageStore.CreateFromDirectoryAsync(root, configuration.Output, configuration.Name, "rustproxy.fetch.json", metadata, cancellationToken);
             logger.Info("Fetch completed");
         }
         finally
         {
-            try
-            {
-                Directory.Delete(root, true);
-            }
-            catch
-            {
-                //ignore
-            }
+            PackageStore.DeleteTemporary(root);
         }
     }
 }

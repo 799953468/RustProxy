@@ -5,6 +5,38 @@ namespace RustProxy.Core.Sync;
 /// <summary>Describes Cargo dependencies and rustup toolchains to fetch.</summary>
 public sealed class FetchConfiguration
 {
+    /// <summary>Maximum number of simultaneous crate downloads.</summary>
+    [Range(1, 16)]
+    public int MaxConcurrentDownloads { get; set; } = 4;
+
+    /// <summary>Validates scalar and nested configuration before any I/O is performed.</summary>
+    public void Validate()
+    {
+        try
+        {
+            Validator.ValidateObject(this, new ValidationContext(this), validateAllProperties: true);
+            if (Name.Length > 256 || Toolchains is null || Toolchains.Count > 100 || RustupInitTargets is null || RustupInitTargets.Count > 32)
+                throw new ValidationException("Invalid configuration collections or package name.");
+            if (!Uri.TryCreate(CargoIndexUrl, UriKind.Absolute, out var index) || index.Scheme is not ("https" or "http") || !string.IsNullOrEmpty(index.UserInfo))
+                throw new ValidationException("cargoIndexUrl must be an HTTP(S) URL without credentials.");
+            foreach (var toolchain in Toolchains)
+            {
+                if (toolchain is null) throw new ValidationException("Null toolchain entry.");
+                Validator.ValidateObject(toolchain, new ValidationContext(toolchain), validateAllProperties: true);
+                RustupToolchainFetcher.GetManifestPath(toolchain.Version);
+                ValidateTarget(toolchain.Target);
+            }
+            foreach (var target in RustupInitTargets) ValidateTarget(target);
+            if (string.IsNullOrWhiteSpace(CargoProject) && Toolchains.Count == 0) throw new ValidationException("Configure CargoProject or at least one toolchain.");
+        }
+        catch (ValidationException exception) { throw new InvalidDataException(exception.Message, exception); }
+    }
+
+    internal static void ValidateTarget(string target)
+    {
+        if (string.IsNullOrWhiteSpace(target) || target.Length > 128 || target[0] == '-' || !target.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
+            throw new InvalidDataException("Invalid rustup target triple.");
+    }
     /// <summary>Gets or sets the resulting package name.</summary>
     [Required]
     public string Name { get; set; } = "offline-rust";

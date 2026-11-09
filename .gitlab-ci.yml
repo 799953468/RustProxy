@@ -13,8 +13,8 @@ variables:
 cache:
   key:
     files:
-      - RustProxy.Core/RustProxy.Core.csproj
-      - RustProxy.Server/RustProxy.Server.csproj
+      - RustProxy.Core/packages.lock.json
+      - RustProxy.Server/packages.lock.json
   paths:
     - .nuget/packages/
 
@@ -22,8 +22,9 @@ verify:
   stage: verify
   script:
     - dotnet --info
-    - dotnet restore RustProxy.slnx
+    - dotnet restore RustProxy.slnx --locked-mode
     - dotnet build RustProxy.slnx --configuration Release --no-restore
+    - dotnet test RustProxy.slnx --configuration Release --no-build --no-restore
     - git diff --check
 
 publish:
@@ -44,20 +45,22 @@ publish:
       variables:
         PACKAGE_VERSION: "$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
   script:
-    - dotnet restore RustProxy.slnx --runtime "$RID"
+    - dotnet restore RustProxy.slnx --locked-mode
     - mkdir -p "artifacts/$RID/server" "artifacts/$RID/cli"
     - dotnet publish RustProxy.Server/RustProxy.Server.csproj --configuration Release --runtime "$RID" --self-contained false --no-restore --output "artifacts/$RID/server"
     - dotnet publish RustProxy.Cli/RustProxy.Cli.csproj --configuration Release --runtime "$RID" --self-contained false --no-restore --output "artifacts/$RID/cli"
     - tar -czf "RustProxy-${PACKAGE_VERSION}-${RID}.tar.gz" -C artifacts "$RID"
+    - sha256sum "RustProxy-${PACKAGE_VERSION}-${RID}.tar.gz" > "RustProxy-${PACKAGE_VERSION}-${RID}.tar.gz.sha256"
   artifacts:
     name: "RustProxy-${PACKAGE_VERSION}-${RID}"
     paths:
       - "RustProxy-${PACKAGE_VERSION}-${RID}.tar.gz"
+      - "RustProxy-${PACKAGE_VERSION}-${RID}.tar.gz.sha256"
     expire_in: 30 days
 
 release:
   stage: release
-  image: registry.gitlab.com/gitlab-org/cli:latest
+  image: registry.gitlab.com/gitlab-org/cli:v1.128.0@sha256:00884510ffcbb6b03c0abc5dd058d7728a646cab2a419de4a7108d073ce90a03
   cache: []
   needs:
     - job: publish

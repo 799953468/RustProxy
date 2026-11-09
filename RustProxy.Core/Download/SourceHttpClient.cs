@@ -6,7 +6,7 @@ namespace RustProxy.Core.Download;
 public sealed class SourceHttpClient : HttpClient
 {
     /// <summary>Initializes the client with a long download timeout and an identifying user agent.</summary>
-    public SourceHttpClient()
+    public SourceHttpClient() : base(new HttpClientHandler { AllowAutoRedirect = false })
     {
         Timeout = TimeSpan.FromMinutes(30);
         DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("RustProxy", "1.0"));

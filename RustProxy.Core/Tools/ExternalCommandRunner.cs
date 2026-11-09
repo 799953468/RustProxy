@@ -21,12 +21,33 @@ public sealed class ExternalCommandRunner
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = startInfo };
         if (!process.Start()) throw new InvalidOperationException($"Could not start {fileName}.");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
+        var outputTask = ReadBoundedAsync(process.StandardOutput);
+        var errorTask = ReadBoundedAsync(process.StandardError);
+        try { await process.WaitForExitAsync(cancellationToken); }
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+            await process.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(outputTask, errorTask);
+            throw;
+        }
         var result = new CommandResult(process.ExitCode, await outputTask, await errorTask);
         if (result.ExitCode != 0) throw new InvalidOperationException($"{fileName} failed with exit code {result.ExitCode}: {result.StandardError.Trim()}");
         return result;
+    }
+
+    private static async Task<string> ReadBoundedAsync(StreamReader reader)
+    {
+        var text = new System.Text.StringBuilder();
+        var buffer = new char[4096];
+        int read;
+        while ((read = await reader.ReadAsync(buffer)) > 0)
+        {
+            var take = Math.Min(read, 65536 - text.Length);
+            if (take > 0) text.Append(buffer, 0, take);
+        }
+        return text.ToString();
     }
 }
 

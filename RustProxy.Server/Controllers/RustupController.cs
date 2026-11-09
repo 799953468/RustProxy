@@ -18,7 +18,6 @@ public sealed class RustupController(PackageCatalog catalog) : ControllerBase
             : path;
         var file = await catalog.FindSourceFileAsync("rustup", sourcePath, cancellationToken);
         if (file is null) return NotFound();
-        if (SourceFileResponse.IsNotModified(this, file)) return StatusCode(StatusCodes.Status304NotModified);
-        return PhysicalFile(file, "application/octet-stream", enableRangeProcessing: true);
+        return SourceFileResponse.Create(this, file, "application/octet-stream", immutable: false);
     }
 }

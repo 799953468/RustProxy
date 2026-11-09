@@ -4,15 +4,27 @@ using RustProxy.Server.Entities;
 namespace RustProxy.Server.Services;
 
 /// <summary>Initializes the package metadata database schema and removes stale records.</summary>
-public sealed class PackageMetadataInitializer(ISqlSugarClient database, PackageCatalog catalog) : IHostedService
+public sealed class PackageMetadataInitializer(ISqlSugarClient database, PackageCatalog catalog, ILogger<PackageMetadataInitializer> logger) : BackgroundService
 {
     /// <inheritdoc />
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public override async Task StartAsync(CancellationToken cancellationToken)
     {
         database.CodeFirst.InitTables<PackageMetadata, PackageCargoDependencyMetadata, PackageToolchainMetadata, PackageFileMetadata>();
-        await catalog.RemoveInvalidPackagesAsync(cancellationToken);
+        DatabaseStorage.UpgradeOptionalColumns(database.CurrentConnectionConfig.ConnectionString);
+        await catalog.MigrateLegacyFilesAsync(cancellationToken);
+        await base.StartAsync(cancellationToken);
     }
 
     /// <inheritdoc />
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await Task.Yield();
+            var failures = await catalog.AuditAsync(stoppingToken);
+            logger.LogInformation("Background integrity audit finished with {Failures} unavailable objects", failures);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        catch (Exception exception) { logger.LogError(exception, "Background integrity audit failed; catalog history was retained"); }
+    }
 }

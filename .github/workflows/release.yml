@@ -2,15 +2,35 @@ name: Release
 
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          global-json-file: global.json
+          include-prerelease: true
+      - run: dotnet restore RustProxy.slnx --locked-mode
+      - run: dotnet build RustProxy.slnx --configuration Release --no-restore
+      - run: dotnet test RustProxy.slnx --configuration Release --no-build --no-restore
+      - run: git diff --check
+
   publish:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
     name: Publish ${{ matrix.rid }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -27,10 +47,10 @@ jobs:
             runner: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install .NET SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           global-json-file: global.json
           include-prerelease: true
@@ -39,14 +59,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          dotnet restore RustProxy.slnx --locked-mode
           output="artifacts/${{ matrix.rid }}"
           mkdir -p "$output/server" "$output/cli"
           dotnet publish RustProxy.Server/RustProxy.Server.csproj \
             -c Release -r "${{ matrix.rid }}" --self-contained false \
-            -o "$output/server"
+            --no-restore -o "$output/server"
           dotnet publish RustProxy.Cli/RustProxy.Cli.csproj \
             -c Release -r "${{ matrix.rid }}" --self-contained false \
-            -o "$output/cli"
+            --no-restore -o "$output/cli"
 
       - name: Package release files
         shell: bash
@@ -58,19 +79,25 @@ jobs:
           else
             zip -qr "RustProxy-${{ matrix.rid }}.zip" "${{ matrix.rid }}"
           fi
+          package="RustProxy-${{ matrix.rid }}.zip"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$package" > "$package.sha256"
+          else
+            shasum -a 256 "$package" > "$package.sha256"
+          fi
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: RustProxy-${{ matrix.rid }}
-          path: artifacts/RustProxy-${{ matrix.rid }}.zip
+          path: artifacts/RustProxy-${{ matrix.rid }}.zip*
           if-no-files-found: error
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/') && github.server_url == 'https://github.com'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: artifacts/RustProxy-${{ matrix.rid }}.zip
+          files: artifacts/RustProxy-${{ matrix.rid }}.zip*
           body_path: CHANGELOG.md
           generate_release_notes: false
 
@@ -86,23 +113,22 @@ jobs:
             exit 1
           fi
           api_url="${{ github.api_url }}/repos/${{ github.repository }}/releases"
-          release=$(curl --silent --show-error \
+          release=$(curl --fail --silent --show-error \
             -H "Authorization: token $GITEA_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME}\",\"draft\":false,\"prerelease\":false}" \
-            "$api_url" || true)
-          if [[ -z "$release" ]]; then
-            release=$(curl --fail --silent --show-error \
-              -H "Authorization: token $GITEA_TOKEN" \
-              "$api_url/tags/${GITHUB_REF_NAME}")
-          fi
+            "$api_url") || release=$(curl --fail --silent --show-error \
+            -H "Authorization: token $GITEA_TOKEN" \
+            "$api_url/tags/${GITHUB_REF_NAME}")
           upload_url=$(printf '%s' "$release" | jq -r '.upload_url // empty' | sed 's/{?name,label}//')
           if [[ -z "$upload_url" ]]; then
             echo "Unable to find Gitea release upload URL" >&2
             exit 1
           fi
-          curl --fail --silent --show-error \
-            -H "Authorization: token $GITEA_TOKEN" \
-            -H "Content-Type: application/zip" \
-            --data-binary "@artifacts/RustProxy-${{ matrix.rid }}.zip" \
-            "$upload_url?name=RustProxy-${{ matrix.rid }}.zip"
+          for file in "artifacts/RustProxy-${{ matrix.rid }}.zip" "artifacts/RustProxy-${{ matrix.rid }}.zip.sha256"; do
+            curl --fail --silent --show-error \
+              -H "Authorization: token $GITEA_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file" \
+              "$upload_url?name=${file##*/}"
+          done

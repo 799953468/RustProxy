@@ -4,7 +4,7 @@
 
 <PageTitle>RustProxy / Sources</PageTitle>
 
-<div class="workspace-head"><div><p class="eyebrow">Offline source registry</p><h1>Available sources</h1><p class="lede">Cargo dependencies and Rust toolchains available to offline clients.</p></div><a class="button button-primary" href="import">Import package</a></div>
+<div class="workspace-head"><div><p class="eyebrow">Offline source registry</p><h1>Available sources</h1><p class="lede">Cargo dependencies and Rust toolchains available to offline clients.</p></div><a class="button button-primary" href="import" data-enhance-nav="false">Import package</a></div>
 
 <div class="stat-strip"><div><strong>@dependencies.Count</strong><span>Cargo crates</span></div><div><strong>@toolchains.Count</strong><span>Toolchains</span></div><div><strong>@fileCount</strong><span>Source files</span></div><div><strong>Ready</strong><span>Source status</span></div></div>
 
@@ -20,13 +20,13 @@
     private sealed record CargoDependencyGroup(string Name, List<string> Versions);
     protected override async Task OnInitializedAsync()
     {
-        var manifests = await Catalog.ListAsync();
-        dependencies = manifests.SelectMany(manifest => manifest.CargoDependencies)
+        var overview = await Catalog.GetOverviewAsync();
+        dependencies = overview.Dependencies
             .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
             .Select(group => new CargoDependencyGroup(group.Key, group.Select(item => item.Version).Distinct().Order(StringComparer.Ordinal).ToList()))
             .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        toolchains = manifests.SelectMany(manifest => manifest.Toolchains).GroupBy(item => $"{item.Version}:{item.Target}").Select(group => group.First()).OrderBy(item => item.Version).ThenBy(item => item.Target).ToList();
-        fileCount = manifests.Sum(manifest => manifest.Files.Count);
+        toolchains = overview.Toolchains.GroupBy(item => $"{item.Version}:{item.Target}").Select(group => group.First()).OrderBy(item => item.Version).ThenBy(item => item.Target).ToList();
+        fileCount = overview.FileCount;
     }
 }

@@ -1,4 +1,6 @@
 @page "/import"
+@attribute [Authorize(Policy = "Administrator")]
+@implements IDisposable
 @using Microsoft.AspNetCore.Components.Forms
 @inject RustProxy.Server.Services.PackageCatalog Catalog
 
@@ -12,13 +14,17 @@
     private bool importing;
     private bool failed;
     private string? message;
+    private readonly CancellationTokenSource lifetime = new();
+    [CascadingParameter] private Task<AuthenticationState> AuthenticationStateTask { get; set; } = default!;
     private void OnFileSelected(InputFileChangeEventArgs args) { selectedFile = args.File; message = null; }
     private async Task ImportAsync()
     {
         if (selectedFile is null) return;
         importing = true; failed = false; message = null;
-        try { await using var stream = selectedFile.OpenReadStream(1024L * 1024L * 1024L); var imported = await Catalog.ImportAsync(stream, selectedFile.Name); message = $"Imported package {imported.Id} with {imported.Manifest.Files.Count} files."; selectedFile = null; }
-        catch (Exception exception) when (exception is InvalidDataException or IOException or ArgumentException) { failed = true; message = exception.Message; }
+        try { var actor = (await AuthenticationStateTask).User; await using var stream = selectedFile.OpenReadStream(Catalog.Limits.MaxPackageBytes, lifetime.Token); var imported = await Catalog.ImportAsync(stream, selectedFile.Name, actor, lifetime.Token); message = $"Imported package {imported.Id} with {imported.Manifest.Files.Count} files."; selectedFile = null; }
+        catch (OperationCanceledException) { failed = true; message = "Import cancelled or timed out."; }
+        catch (Exception exception) when (exception is InvalidDataException or IOException or ArgumentException or UnauthorizedAccessException or InvalidOperationException) { failed = true; message = exception.Message; }
         finally { importing = false; }
     }
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
 }

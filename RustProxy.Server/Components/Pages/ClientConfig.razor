@@ -19,7 +19,7 @@
     </div>
 </section>
 
-<div class="selected-platform-note"><span class="status-dot"></span><span>Showing commands for <strong>@CurrentPlatform.Name</strong>. You can switch platforms at any time.</span></div>
+<div class="selected-platform-note"><span class="status-dot"></span><span>Showing commands for <strong>@CurrentPlatform.Name</strong>.</span><label>Architecture <select @bind="selectedArchitecture"><option value="x64">x86_64</option><option value="arm64">aarch64 / ARM64</option></select></label><code>@CurrentTarget</code></div>
 
 <section class="config-grid">
     <div class="config-card"><div class="config-card-head"><span class="config-badge cargo-badge">C</span><div><h2>Cargo</h2><p>Configure the local sparse registry for crates.</p></div></div><label>Registry index</label><code class="code-block">sparse+@BaseUri/cargo/index/</code><label>Cargo config</label><pre><code>[source.crates-io]
@@ -31,7 +31,7 @@ registry = "sparse+@BaseUri/cargo/index/"
     <div class="config-card"><div class="config-card-head"><span class="config-badge rustup-badge">R</span><div><h2>rustup</h2><p>Install rustup and toolchains from this local mirror.</p></div></div><label>@CurrentPlatform.ShellLabel</label><pre><code>@RustupCommand</code></pre><label>Install a toolchain</label><pre><code>rustup toolchain install stable --component rust-src</code></pre><p class="config-hint">The installer URL and update metadata are served from this mirror.</p></div>
 </section>
 
-<div class="config-footnote"><span class="status-dot"></span><span>These commands use the current browser origin. Configure the environment before running the cached rustup-init.</span></div>
+<div class="config-footnote"><span class="status-dot"></span><span>These commands use the current browser origin. Import the installer for the selected architecture and configure the environment before running rustup-init.</span></div>
 
 @code {
     private readonly IReadOnlyList<PlatformOption> platforms =
@@ -41,11 +41,13 @@ registry = "sparse+@BaseUri/cargo/index/"
         new("windows", "Windows", "⊞", "%USERPROFILE%\\.cargo\\config.toml", "PowerShell", "$env:RUSTUP_DIST_SERVER = \"{0}\"\n$env:RUSTUP_UPDATE_ROOT = \"{0}/rustup\"\nInvoke-WebRequest \"{0}/rustup/dist/{1}/rustup-init.exe\" -OutFile rustup-init.exe\n.\\rustup-init.exe")
     ];
     private string selectedPlatform = "linux";
+    private string selectedArchitecture = "x64";
     private string? detectedPlatform;
     private IJSObjectReference? module;
     private string BaseUri => Navigation.BaseUri.TrimEnd('/');
     private PlatformOption CurrentPlatform => platforms.First(platform => platform.Id == selectedPlatform);
-    private string RustupCommand => string.Format(CurrentPlatform.RustupTemplate, BaseUri, CurrentPlatform.RustupTarget);
+    private string CurrentTarget => (selectedArchitecture == "arm64" ? "aarch64" : "x86_64") + (selectedPlatform switch { "windows" => "-pc-windows-msvc", "macos" => "-apple-darwin", _ => "-unknown-linux-gnu" });
+    private string RustupCommand => string.Format(CurrentPlatform.RustupTemplate, BaseUri, CurrentTarget);
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -55,6 +57,7 @@ registry = "sparse+@BaseUri/cargo/index/"
             module = await Js.InvokeAsync<IJSObjectReference>("import", "./platform-detector.js");
             detectedPlatform = await module.InvokeAsync<string>("detectPlatform");
             selectedPlatform = platforms.Any(platform => platform.Id == detectedPlatform) ? detectedPlatform : "linux";
+            selectedArchitecture = selectedPlatform == "macos" ? "arm64" : "x64";
             StateHasChanged();
         }
         catch (JSException)
@@ -66,13 +69,5 @@ registry = "sparse+@BaseUri/cargo/index/"
     private void SelectPlatform(string platform) => selectedPlatform = platform;
     public async ValueTask DisposeAsync() { if (module is not null) await module.DisposeAsync(); }
 
-    private sealed record PlatformOption(string Id, string Name, string Symbol, string CargoConfigPath, string ShellLabel, string RustupTemplate)
-    {
-        public string RustupTarget => Id switch
-        {
-            "windows" => "x86_64-pc-windows-msvc",
-            "macos" => "aarch64-apple-darwin",
-            _ => "x86_64-unknown-linux-gnu"
-        };
-    }
+    private sealed record PlatformOption(string Id, string Name, string Symbol, string CargoConfigPath, string ShellLabel, string RustupTemplate);
 }

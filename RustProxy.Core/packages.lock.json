@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net11.0": {
+      "SharpCompress": {
+        "type": "Direct",
+        "requested": "[0.50.7, )",
+        "resolved": "0.50.7",
+        "contentHash": "amxjOlPKUFb33ohAVahPCCBHLtToYOOb6JGyM40q8DnT6KYoBLW1TtW6uLEXbv40S7ej6ikf6VmAXGBaFL6Klg=="
+      },
+      "Tomlyn": {
+        "type": "Direct",
+        "requested": "[0.19.0, )",
+        "resolved": "0.19.0",
+        "contentHash": "GlI2o8R8jbZIaE+YX6uA/VoAOH7zIxYeqxDm7jHW2hqUhuB+q19oKold35FkMuv8IZDoCqsTMolaBv2eBLBmrQ=="
+      }
+    },
+    "net11.0/linux-arm64": {},
+    "net11.0/linux-x64": {},
+    "net11.0/osx-arm64": {},
+    "net11.0/win-x64": {}
+  }
+}

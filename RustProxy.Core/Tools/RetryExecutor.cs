@@ -29,6 +29,8 @@ public sealed class RetryExecutor(IFetchLogger logger)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operation);
         ArgumentNullException.ThrowIfNull(action);
+        if (maxAttempts is < 1 or > 20) throw new ArgumentOutOfRangeException(nameof(maxAttempts));
+        if (initialDelay < TimeSpan.Zero || initialDelay > TimeSpan.FromMinutes(5)) throw new ArgumentOutOfRangeException(nameof(initialDelay));
         Exception? last = null;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
@@ -40,7 +42,9 @@ public sealed class RetryExecutor(IFetchLogger logger)
             catch (Exception exception) when (attempt < maxAttempts && !cancellationToken.IsCancellationRequested && IsRetryable(exception))
             {
                 last = exception;
-                var delay = TimeSpan.FromMilliseconds(initialDelay.TotalMilliseconds * Math.Pow(2, attempt - 1));
+                var delay = exception.Data["RetryAfter"] is TimeSpan retryAfter
+                    ? TimeSpan.FromMilliseconds(Math.Clamp(retryAfter.TotalMilliseconds, 0, 300_000))
+                    : TimeSpan.FromMilliseconds(Math.Min(300_000, initialDelay.TotalMilliseconds * Math.Pow(2, attempt - 1)) * (0.8 + Random.Shared.NextDouble() * 0.2));
                 logger.Retry(operation, attempt, maxAttempts, exception, delay);
                 await Task.Delay(delay, cancellationToken);
             }
@@ -50,7 +54,7 @@ public sealed class RetryExecutor(IFetchLogger logger)
     }
 
     private static bool IsRetryable(Exception exception) =>
-        exception is IOException or TimeoutException ||
+        exception is IOException or TimeoutException or TaskCanceledException ||
         exception is HttpRequestException httpException &&
-        (httpException.StatusCode is null || (int)httpException.StatusCode >= 500);
+        (httpException.StatusCode is null || (int)httpException.StatusCode >= 500 || (int)httpException.StatusCode is 408 or 429);
 }

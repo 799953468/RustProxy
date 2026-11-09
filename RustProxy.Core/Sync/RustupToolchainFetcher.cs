@@ -1,200 +1,131 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using Tomlyn;
+using Tomlyn.Model;
+using RustProxy.Core.Download;
+using RustProxy.Core.Storage;
 using RustProxy.Core.Tools;
 
 namespace RustProxy.Core.Sync;
 
-/// <summary>Fetches a selected rustup channel manifest and target archives.</summary>
-public sealed partial class RustupToolchainFetcher(
-    HttpClient httpClient,
-    RetryExecutor retryExecutor,
-    IFetchLogger logger)
+/// <summary>Fetches byte-verified Rust toolchains independently of the rustup updater release channel.</summary>
+public sealed partial class RustupToolchainFetcher(HttpClient httpClient, RetryExecutor retryExecutor, IFetchLogger logger)
 {
-    [GeneratedRegex("""^\[pkg\.(?<package>[^.\]]+)(?:\.target\.(?:"(?<quotedTarget>[^"]+)"|(?<target>[^\]]+)))?\]$""")]
-    private static partial Regex SectionPattern();
+    private readonly Dictionary<string, string> _downloaded = new(StringComparer.Ordinal);
 
-    [GeneratedRegex("^(?<kind>xz_)?url\\s*=\\s*\\\"(?<url>[^\\\"]+)\\\"$")]
-    private static partial Regex UrlPattern();
+    [GeneratedRegex("^(stable|beta|nightly)(?:-([0-9]{4}-[0-9]{2}-[0-9]{2}))?$")]
+    private static partial Regex ChannelPattern();
+    [GeneratedRegex("^[0-9]+\\.[0-9]+\\.[0-9]+$")]
+    private static partial Regex VersionPattern();
 
-    [GeneratedRegex("^(?<kind>xz_)?hash\\s*=\\s*\\\"(?<hash>[a-fA-F0-9]{64})\\\"$")]
-    private static partial Regex HashPattern();
-
-    /// <summary>Downloads a channel manifest, installer binaries, and target archives into a source directory.</summary>
-    public async Task FetchToDirectoryAsync(string toolchain, string target, string destinationDirectory,
-        Uri? source = null, int maxAttempts = 4, TimeSpan? retryDelay = null,
-        CancellationToken cancellationToken = default, IReadOnlyList<string>? rustupInitTargets = null)
+    /// <summary>Maps exact versions and dated channels onto rustup's distribution manifest paths.</summary>
+    public static string GetManifestPath(string toolchain)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(toolchain);
-        ArgumentException.ThrowIfNullOrWhiteSpace(target);
-        var baseUri = source ?? new Uri("https://static.rust-lang.org/dist/");
-        var channel =
-            toolchain.Equals("stable", StringComparison.OrdinalIgnoreCase) ||
-            toolchain.Equals("beta", StringComparison.OrdinalIgnoreCase) ||
-            toolchain.Equals("nightly", StringComparison.OrdinalIgnoreCase)
-                ? toolchain.ToLowerInvariant()
-                : toolchain;
+        if (VersionPattern().IsMatch(toolchain)) return $"channel-rust-{toolchain}.toml";
+        var match = ChannelPattern().Match(toolchain);
+        if (!match.Success) throw new InvalidDataException("Use stable, beta, nightly, x.y.z, or channel-YYYY-MM-DD.");
+        var channel = match.Groups[1].Value;
+        if (!match.Groups[2].Success) return $"channel-rust-{channel}.toml";
+        var date = match.Groups[2].Value;
+        if (!DateOnly.TryParseExact(date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+            throw new InvalidDataException("Invalid toolchain date.");
+        return $"{date}/channel-rust-{channel}.toml";
+    }
+
+    /// <summary>Downloads manifests, verified installers and target archives into a portable source tree.</summary>
+    public async Task FetchToDirectoryAsync(string toolchain, string target, string destinationDirectory, Uri? source = null,
+        int maxAttempts = 4, TimeSpan? retryDelay = null, CancellationToken cancellationToken = default, IReadOnlyList<string>? rustupInitTargets = null)
+    {
+        var manifestPath = GetManifestPath(toolchain);
+        FetchConfiguration.ValidateTarget(target);
+        var baseUri = HttpDownload.Validate(source ?? new Uri("https://static.rust-lang.org/dist/"));
+        if (!baseUri.AbsolutePath.EndsWith('/')) throw new InvalidDataException("The rustup distribution URL must end with '/'.");
         var outputRoot = Path.Combine(destinationDirectory, "rustup", "dist");
         Directory.CreateDirectory(outputRoot);
+        var delay = retryDelay ?? TimeSpan.FromSeconds(3);
 
-        await FetchFileAsync(new Uri(baseUri, $"../rustup/release-{channel}.toml"),
-            Path.Combine(destinationDirectory, "rustup", $"release-{channel}.toml"),
-            $"release-{channel}.toml", null, maxAttempts, retryDelay, cancellationToken);
-
-        var installerTargets = (rustupInitTargets ?? [target]).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        foreach (var installerTarget in installerTargets)
+        // The rustup updater has its own stable release; it does not use Rust's version number.
+        var release = await ReadAsync(new Uri(baseUri, "../rustup/release-stable.toml"), maxAttempts, delay, cancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(destinationDirectory, "rustup", "release-stable.toml"), release, cancellationToken);
+        foreach (var installerTarget in (rustupInitTargets ?? [target]).Distinct(StringComparer.Ordinal))
         {
-            var installerName = installerTarget.Contains("windows", StringComparison.OrdinalIgnoreCase) ? "rustup-init.exe" : "rustup-init";
-            var installerPath = $"../rustup/dist/{installerTarget}/{installerName}";
-            await FetchFileAsync(new Uri(baseUri, installerPath),
-                Path.Combine(destinationDirectory, "rustup", "dist", installerTarget, installerName),
-                installerPath, null, maxAttempts, retryDelay, cancellationToken);
+            FetchConfiguration.ValidateTarget(installerTarget);
+            var name = installerTarget.Contains("windows", StringComparison.Ordinal) ? "rustup-init.exe" : "rustup-init";
+            var relative = $"{installerTarget}/{name}";
+            var uri = new Uri(baseUri, "../rustup/dist/" + relative);
+            var hash = ParseSha256(Encoding.UTF8.GetString(await ReadAsync(new Uri(uri.AbsoluteUri + ".sha256"), maxAttempts, delay, cancellationToken)));
+            await FetchFileAsync(uri, PathSafety.Resolve(outputRoot, relative), hash, maxAttempts, delay, cancellationToken);
         }
 
-        var manifestPath = $"channel-rust-{channel}.toml";
-        logger.Info($"rustup: downloading channel manifest {manifestPath}");
-        var manifestText = await retryExecutor.ExecuteAsync(manifestPath, async () =>
-        {
-            using var response = await httpClient.GetAsync(new Uri(baseUri, manifestPath), cancellationToken);
-            response.EnsureSuccessStatusCode();
-            return await response.Content.ReadAsStringAsync(cancellationToken);
-        }, maxAttempts, retryDelay ?? TimeSpan.FromSeconds(3), cancellationToken);
-        var manifestHashPath = $"{manifestPath}.sha256";
-        logger.Info($"rustup: downloading channel checksum {manifestHashPath}");
-        var manifestHashText = await retryExecutor.ExecuteAsync(manifestHashPath, async () =>
-        {
-            using var response = await httpClient.GetAsync(new Uri(baseUri, manifestHashPath), cancellationToken);
-            response.EnsureSuccessStatusCode();
-            return await response.Content.ReadAsStringAsync(cancellationToken);
-        }, maxAttempts, retryDelay ?? TimeSpan.FromSeconds(3), cancellationToken);
-        var expectedManifestHash = ParseSha256(manifestHashText, manifestHashPath);
-        var actualManifestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(manifestText))).ToLowerInvariant();
-        if (!actualManifestHash.Equals(expectedManifestHash, StringComparison.OrdinalIgnoreCase))
+        var manifest = await ReadAsync(new Uri(baseUri, manifestPath), maxAttempts, delay, cancellationToken);
+        var checksum = await ReadAsync(new Uri(baseUri, manifestPath + ".sha256"), maxAttempts, delay, cancellationToken);
+        var expected = ParseSha256(Encoding.UTF8.GetString(checksum));
+        if (!Convert.ToHexString(SHA256.HashData(manifest)).Equals(expected, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"SHA-256 mismatch for {manifestPath}");
-        var archives = ParseSelectedArchives(manifestText, target);
-        var staging = Path.Combine(destinationDirectory, "rustup", "dist");
-        Directory.CreateDirectory(staging);
-        await File.WriteAllTextAsync(Path.Combine(staging, manifestPath), manifestText, cancellationToken);
-        await File.WriteAllTextAsync(Path.Combine(staging, manifestHashPath), manifestHashText, cancellationToken);
-        foreach (var archive in archives)
-        {
-            var uri = new Uri(baseUri, archive.Url);
-            var relative = uri.AbsolutePath;
-            if (uri.AbsolutePath.StartsWith(baseUri.AbsolutePath, StringComparison.Ordinal))
-                relative = uri.AbsolutePath[baseUri.AbsolutePath.Length..];
-            relative = relative.TrimStart('/');
-            var targetPath = Path.Combine(staging, relative.Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-            logger.Info($"rustup: downloading {relative}");
-            await retryExecutor.ExecuteAsync(relative, async () =>
-            {
-                using var archiveResponse = await httpClient.GetAsync(uri, cancellationToken);
-                archiveResponse.EnsureSuccessStatusCode();
-                await using (var input = await archiveResponse.Content.ReadAsStreamAsync(cancellationToken))
-                await using (var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, true))
-                {
-                    await input.CopyToAsync(output, cancellationToken);
-                    await output.FlushAsync(cancellationToken);
-                }
+        var targetManifest = PathSafety.Resolve(outputRoot, manifestPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(targetManifest)!);
+        await File.WriteAllBytesAsync(targetManifest, manifest, cancellationToken);
+        await File.WriteAllBytesAsync(targetManifest + ".sha256", checksum, cancellationToken);
 
-                await using var hashStream = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
-                var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(hashStream, cancellationToken)).ToLowerInvariant();
-                if (archive.Hash is not null && !actualHash.Equals(archive.Hash, StringComparison.OrdinalIgnoreCase))
-                    throw new IOException($"SHA-256 mismatch for {relative}");
-                return true;
-            }, maxAttempts, retryDelay ?? TimeSpan.FromSeconds(3), cancellationToken);
+        foreach (var archive in ParseSelectedArchives(Encoding.UTF8.GetString(manifest), target))
+        {
+            var uri = HttpDownload.Validate(new Uri(baseUri, archive.Url));
+            // Preserve the upstream dist path, including date directories.
+            if (!uri.AbsolutePath.StartsWith(baseUri.AbsolutePath, StringComparison.Ordinal) || uri.AbsolutePath.Contains('%'))
+                throw new InvalidDataException("Component URL must refer to the distribution path.");
+            var relative = PathSafety.Normalize(uri.AbsolutePath[baseUri.AbsolutePath.Length..]);
+            await FetchFileAsync(uri, PathSafety.Resolve(outputRoot, relative), archive.Hash, maxAttempts, delay, cancellationToken);
         }
     }
 
-    private async Task FetchFileAsync(Uri uri, string targetPath, string relativePath, string? expectedHash,
-        int maxAttempts, TimeSpan? retryDelay, CancellationToken cancellationToken)
+    private Task<byte[]> ReadAsync(Uri uri, int attempts, TimeSpan delay, CancellationToken token) =>
+        retryExecutor.ExecuteAsync("rustup metadata", () => HttpDownload.ReadBytesAsync(httpClient, uri, token), attempts, delay, token);
+
+    private async Task FetchFileAsync(Uri uri, string path, string hash, int attempts, TimeSpan delay, CancellationToken token)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-        logger.Info($"rustup: downloading {relativePath}");
-        await retryExecutor.ExecuteAsync(relativePath, async () =>
+        if (_downloaded.TryGetValue(Path.GetFullPath(path), out var previous) && previous == hash && File.Exists(path)) return;
+        logger.Info($"rustup: downloading {Path.GetFileName(path)}");
+        await retryExecutor.ExecuteAsync("rustup archive", async () =>
         {
-            using var response = await httpClient.GetAsync(uri, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-            await using var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, true);
-            await input.CopyToAsync(output, cancellationToken);
-            await output.FlushAsync(cancellationToken);
-            if (expectedHash is not null)
-            {
-                output.Close();
-                await using var hashStream = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
-                var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(hashStream, cancellationToken)).ToLowerInvariant();
-                if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) throw new IOException($"SHA-256 mismatch for {relativePath}");
-            }
+            await HttpDownload.DownloadAsync(httpClient, uri, path, hash, token);
             return true;
-        }, maxAttempts, retryDelay ?? TimeSpan.FromSeconds(3), cancellationToken);
+        }, attempts, delay, token);
+        _downloaded[Path.GetFullPath(path)] = hash;
     }
 
     private static ArchiveReference[] ParseSelectedArchives(string manifest, string target)
     {
-        var selected = new Dictionary<string, (string Url, string? Hash, bool Compressed)>(StringComparer.OrdinalIgnoreCase);
-        string? package = null;
-        string? sectionTarget = null;
-        string? url = null;
-        string? hash = null;
-        var compressed = false;
-        foreach (var raw in manifest.Split('\n'))
+        var document = Toml.Parse(manifest);
+        if (document.HasErrors) throw new InvalidDataException($"Invalid rustup manifest: {document.Diagnostics}");
+        var model = document.ToModel();
+        if (!model.TryGetValue("pkg", out var packagesValue) || packagesValue is not TomlTable packages) throw new InvalidDataException("Rustup manifest has no packages.");
+        var result = new List<ArchiveReference>();
+        foreach (var package in packages)
         {
-            var line = raw.Trim();
-            var section = SectionPattern().Match(line);
-            if (section.Success)
+            if (package.Value is not TomlTable details || !details.TryGetValue("target", out var targetsValue) || targetsValue is not TomlTable targets) continue;
+            foreach (var item in targets)
             {
-                SaveCandidate();
-                package = section.Groups["package"].Value;
-                sectionTarget = section.Groups["quotedTarget"].Success
-                    ? section.Groups["quotedTarget"].Value
-                    : section.Groups["target"].Success ? section.Groups["target"].Value : null;
-                url = null;
-                hash = null;
-                compressed = false;
-                continue;
+                if (item.Key != target && !(package.Key == "rust-src" && item.Key == "*")) continue;
+                if (item.Value is not TomlTable entry || !entry.TryGetValue("available", out var available) || available is not true) continue;
+                var prefix = entry.ContainsKey("xz_url") ? "xz_" : "";
+                if (!entry.TryGetValue(prefix + "url", out var urlValue) || urlValue is not string url ||
+                    !entry.TryGetValue(prefix + "hash", out var hashValue) || hashValue is not string hash || hash.Length != 64 || !hash.All(Uri.IsHexDigit))
+                    throw new InvalidDataException("Available rustup components require URL and SHA-256.");
+                result.Add(new ArchiveReference(url, hash.ToLowerInvariant()));
             }
-
-            var urlMatch = UrlPattern().Match(line);
-            if (urlMatch.Success)
-            {
-                if (urlMatch.Groups["kind"].Success || url is null)
-                {
-                    url = urlMatch.Groups["url"].Value;
-                    compressed = urlMatch.Groups["kind"].Success;
-                }
-
-                continue;
-            }
-
-            var hashMatch = HashPattern().Match(line);
-            if (hashMatch.Success && (hashMatch.Groups["kind"].Success || hash is null))
-                hash = hashMatch.Groups["hash"].Value;
         }
-
-        SaveCandidate();
-        return [.. selected.Values.Select(item => new ArchiveReference(item.Url, item.Hash))];
-
-        void SaveCandidate()
-        {
-            if (string.IsNullOrWhiteSpace(package) || string.IsNullOrWhiteSpace(url)) return;
-            var targetSelected = sectionTarget is null ||
-                sectionTarget.Equals(target, StringComparison.OrdinalIgnoreCase) ||
-                package.Equals("rust-src", StringComparison.OrdinalIgnoreCase) && sectionTarget is "*" or null;
-            if (!targetSelected) return;
-            var key = $"{package}:{sectionTarget}";
-            if (!selected.TryGetValue(key, out var existing) || compressed && !existing.Compressed)
-                selected[key] = (url, hash, compressed);
-        }
+        if (result.Count == 0) throw new InvalidDataException($"No available components for target {target}.");
+        return result.DistinctBy(x => (x.Url, x.Hash)).ToArray();
     }
 
-    private static string ParseSha256(string content, string path)
+    private static string ParseSha256(string content)
     {
-        var hash = content.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-        if (hash is null || hash.Length != 64 || !hash.All(Uri.IsHexDigit))
-            throw new InvalidDataException($"Invalid SHA-256 file: {path}");
-        return hash;
+        var value = content.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        if (value is null || value.Length != 64 || !value.All(Uri.IsHexDigit)) throw new InvalidDataException("Invalid SHA-256 metadata.");
+        return value.ToLowerInvariant();
     }
 
-    private sealed record ArchiveReference(string Url, string? Hash);
+    private sealed record ArchiveReference(string Url, string Hash);
 }

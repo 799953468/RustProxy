@@ -1,176 +1,106 @@
-using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Tomlyn;
+using Tomlyn.Model;
+using RustProxy.Core.Download;
 using RustProxy.Core.Package;
+using RustProxy.Core.Storage;
 using RustProxy.Core.Tools;
 
 namespace RustProxy.Core.Sync;
 
-/// <summary>Fetches registry dependencies from Cargo.lock into the standard sparse source layout.</summary>
-public sealed partial class CargoDependencyFetcher(
-    HttpClient httpClient,
-    RetryExecutor retryExecutor,
-    IFetchLogger logger)
+/// <summary>Fetches verified registry dependencies from TOML lockfiles into a sparse registry tree.</summary>
+public sealed partial class CargoDependencyFetcher(HttpClient httpClient, RetryExecutor retryExecutor, IFetchLogger logger)
 {
-    [GeneratedRegex(@"(?ms)^\[\[package\]\]\s*(?<body>.*?)(?=^\[\[package\]\]|\z)")]
-    private static partial Regex LockPackagePattern();
-
-    [GeneratedRegex("(?m)^name\\s*=\\s*\"(?<value>[^\"]+)\"$")]
-    private static partial Regex NamePattern();
-
-    [GeneratedRegex("(?m)^version\\s*=\\s*\"(?<value>[^\"]+)\"$")]
-    private static partial Regex VersionPattern();
-
-    [GeneratedRegex("(?m)^source\\s*=\\s*\"(?<value>[^\"]+)\"$")]
-    private static partial Regex SourcePattern();
-
-    [GeneratedRegex("(?m)^checksum\\s*=\\s*\"(?<value>[a-fA-F0-9]{64})\"$")]
-    private static partial Regex ChecksumPattern();
-
     [GeneratedRegex("\\{(?<key>crate|version|prefix|lowerprefix|sha256-checksum)\\}")]
     private static partial Regex TemplatePattern();
 
-    /// <summary>Downloads registry dependencies from Cargo.lock, generating a lockfile from Cargo.toml when absent.</summary>
-    public async Task<IReadOnlyList<CargoDependencyInfo>> FetchAsync(string projectDirectory,
-        string destinationDirectory, string indexUrl, string? downloadUrlTemplate = null, int maxAttempts = 4,
-        TimeSpan? retryDelay = null, CancellationToken cancellationToken = default)
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")]
+    private static partial Regex CratePattern();
+
+    [GeneratedRegex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$")]
+    private static partial Regex VersionPattern();
+
+    /// <summary>Downloads unique index entries and bounded concurrent crate archives.</summary>
+    public async Task<IReadOnlyList<CargoDependencyInfo>> FetchAsync(string projectDirectory, string destinationDirectory, string indexUrl,
+        string? downloadUrlTemplate = null, int maxAttempts = 4, TimeSpan? retryDelay = null, CancellationToken cancellationToken = default, int maxConcurrency = 4)
     {
+        if (maxConcurrency is < 1 or > 16) throw new ArgumentOutOfRangeException(nameof(maxConcurrency));
         var root = Path.GetFullPath(projectDirectory);
         var lockPath = Path.Combine(root, "Cargo.lock");
-        var indexBase = EnsureTrailingSlash(new Uri(indexUrl));
-        if (!File.Exists(lockPath))
-        {
-            logger.Info("Cargo.lock is missing; resolving Cargo.toml with Cargo.");
-            await new CargoCommandResolver(logger).GenerateLockAsync(root, cancellationToken);
-        }
-
-        logger.Info($"Cargo: reading {lockPath}");
-        using var indexResponse = await RetryAsync("Cargo sparse index config.json", () => httpClient.GetAsync(new Uri(indexBase, "config.json"), cancellationToken), maxAttempts, retryDelay,
-            cancellationToken);
-        indexResponse.EnsureSuccessStatusCode();
-        var configText = await indexResponse.Content.ReadAsStringAsync(cancellationToken);
-        var sourceConfig = JsonNode.Parse(configText)?.AsObject() ?? throw new InvalidDataException("Cargo index config.json is not valid JSON.");
-        var upstreamDownloadTemplate = downloadUrlTemplate ?? sourceConfig["dl"]?.GetValue<string>() ?? throw new InvalidDataException("Cargo index config.json has an empty dl URL.");
-        var dlTemplate = NormalizeDownloadTemplate(upstreamDownloadTemplate);
-        const string localDownloadTemplate = "crates/{crate}/{crate}-{version}.crate";
-        var localConfig = new JsonObject { ["dl"] = $"/cargo/{localDownloadTemplate}", ["api"] = "/cargo" };
+        var indexBase = HttpDownload.Validate(new Uri(indexUrl.EndsWith('/') ? indexUrl : indexUrl + "/"));
+        if (!File.Exists(lockPath)) await new CargoCommandResolver(logger).GenerateLockAsync(root, cancellationToken);
         var packages = ParseLockFile(await File.ReadAllTextAsync(lockPath, cancellationToken));
+        logger.Info($"Cargo: resolved {packages.Count} registry archives; Git/path dependencies are not included in the mirror.");
+        var configText = await retryExecutor.ExecuteAsync("Cargo index config.json", () => HttpDownload.ReadTextAsync(httpClient, new Uri(indexBase, "config.json"), cancellationToken, 1024 * 1024),
+            maxAttempts, retryDelay ?? TimeSpan.FromSeconds(3), cancellationToken);
+        JsonObject config;
+        try { config = JsonNode.Parse(configText)?.AsObject() ?? throw new InvalidDataException("Empty Cargo index configuration."); }
+        catch (System.Text.Json.JsonException exception) { throw new InvalidDataException("Invalid Cargo index configuration.", exception); }
+        var template = downloadUrlTemplate ?? config["dl"]?.GetValue<string>() ?? throw new InvalidDataException("Cargo index dl is missing.");
+        if (!template.Contains('{')) template = template.TrimEnd('/') + "/{crate}/{version}/download";
         var cargoRoot = Path.Combine(destinationDirectory, "cargo");
-        var indexRoot = Path.Combine(cargoRoot, "index");
-        var cratesRoot = Path.Combine(cargoRoot, "crates");
-        Directory.CreateDirectory(indexRoot);
-        Directory.CreateDirectory(cratesRoot);
-        var seenDownloadPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var dependency in packages)
+        Directory.CreateDirectory(cargoRoot);
+        await Parallel.ForEachAsync(packages.DistinctBy(x => x.Name), new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = cancellationToken }, async (dependency, token) =>
         {
-            var indexPath = GetIndexPath(dependency.Name);
-            var indexFile = Path.Combine(indexRoot, indexPath.Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(indexFile)!);
-            await DownloadFileAsync(new Uri(indexBase, indexPath), indexFile, $"Cargo index {dependency.Name}", null, maxAttempts, retryDelay, cancellationToken);
-            var crateName = dependency.Name.ToLowerInvariant();
-            var templateValues = new Dictionary<string, string>(StringComparer.Ordinal)
+            var indexPath = GetIndexPath(dependency.Name.ToLowerInvariant());
+            await DownloadAsync(new Uri(indexBase, indexPath), PathSafety.Resolve(cargoRoot, "index/" + indexPath), null, maxAttempts, retryDelay, token);
+        });
+        await Parallel.ForEachAsync(packages, new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = cancellationToken }, async (dependency, token) =>
+        {
+            var crate = dependency.Name;
+            var values = new Dictionary<string, string>
             {
-                ["crate"] = crateName, ["version"] = dependency.Version, ["prefix"] = crateName[..1],
-                ["lowerprefix"] = crateName[..2], ["sha256-checksum"] = dependency.Checksum ?? string.Empty
+                ["crate"] = crate, ["version"] = dependency.Version, ["prefix"] = Prefix(crate),
+                ["lowerprefix"] = Prefix(crate.ToLowerInvariant()), ["sha256-checksum"] = dependency.Checksum!
             };
-            var expandedTemplate = TemplatePattern().Replace(dlTemplate, value => templateValues[value.Groups["key"].Value]);
-            var downloadUri = ResolveDownloadUri(expandedTemplate, indexBase);
-            var downloadPath = string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                "crates/{0}/{0}-{1}.crate", crateName, dependency.Version);
-            var cratePath = Path.GetFullPath(Path.Combine(cargoRoot, downloadPath.Replace('/', Path.DirectorySeparatorChar)));
-            if (!cratePath.StartsWith(Path.GetFullPath(cargoRoot) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-                throw new InvalidDataException("Cargo dl template resolved outside the package source tree.");
-            Directory.CreateDirectory(Path.GetDirectoryName(cratePath)!);
-            if (!seenDownloadPaths.Add(downloadPath)) continue;
-            logger.Info($"Cargo: resolved download URL for {dependency.Name} {dependency.Version}: {downloadUri.GetLeftPart(UriPartial.Path)}");
-            await DownloadFileAsync(downloadUri, cratePath, $"crate {dependency.Name} {dependency.Version}", dependency.Checksum, maxAttempts, retryDelay, cancellationToken);
-        }
-
-        await File.WriteAllTextAsync(Path.Combine(indexRoot, "config.json"), localConfig.ToJsonString(), cancellationToken);
+            var expanded = TemplatePattern().Replace(template, match => values[match.Groups["key"].Value]);
+            if (expanded.Contains('{') || expanded.Contains('}')) throw new InvalidDataException("Unsupported Cargo download URL placeholder.");
+            var uri = HttpDownload.Validate(new Uri(indexBase, expanded));
+            var target = PathSafety.Resolve(cargoRoot, $"crates/{crate}/{crate}-{dependency.Version}.crate");
+            await DownloadAsync(uri, target, dependency.Checksum, maxAttempts, retryDelay, token);
+        });
+        // The server rewrites this template to its public origin for each index response.
+        var local = new JsonObject { ["dl"] = "/cargo/crates/{crate}/{crate}-{version}.crate" };
+        Directory.CreateDirectory(Path.Combine(cargoRoot, "index"));
+        await File.WriteAllTextAsync(Path.Combine(cargoRoot, "index", "config.json"), local.ToJsonString(), cancellationToken);
         return packages;
     }
 
-    private async Task DownloadFileAsync(Uri uri, string path, string label, string? expectedSha256, int maxAttempts, TimeSpan? delay, CancellationToken cancellationToken)
+    private async Task DownloadAsync(Uri uri, string path, string? checksum, int attempts, TimeSpan? delay, CancellationToken token)
     {
-        logger.Info($"Cargo: downloading {label}");
-        await retryExecutor.ExecuteAsync(label, async () =>
+        logger.Info($"Cargo: downloading {Path.GetFileName(path)}");
+        await retryExecutor.ExecuteAsync("Cargo download", async () =>
         {
-            using var response = await httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var status = (int)response.StatusCode;
-                if (status == 403)
-                {
-                    var detail = (await response.Content.ReadAsStringAsync(cancellationToken)).Trim();
-                    if (detail.Length > 300) detail = detail[..300];
-                    throw new HttpRequestException($"HTTP 403 Forbidden while downloading {label} from {uri}. {detail}", null, response.StatusCode);
-                }
-
-                response.EnsureSuccessStatusCode();
-            }
-
-            await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
-            await using (var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 65536, true))
-            {
-                await input.CopyToAsync(output, cancellationToken);
-            }
-
-            if (expectedSha256 is not null)
-            {
-                await using var hashStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
-                var actual = Convert.ToHexString(await SHA256.HashDataAsync(hashStream, cancellationToken)).ToLowerInvariant();
-                if (!actual.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
-                    throw new IOException($"SHA-256 mismatch for {label}");
-            }
-
+            await HttpDownload.DownloadAsync(httpClient, uri, path, checksum, token);
             return true;
-        }, maxAttempts, delay ?? TimeSpan.FromSeconds(3), cancellationToken);
+        }, attempts, delay ?? TimeSpan.FromSeconds(3), token);
     }
-
-    private async Task<HttpResponseMessage> RetryAsync(string label, Func<Task<HttpResponseMessage>> operation,
-        int maxAttempts, TimeSpan? delay, CancellationToken cancellationToken) =>
-        await retryExecutor.ExecuteAsync(label, operation, maxAttempts, delay ?? TimeSpan.FromSeconds(3), cancellationToken);
 
     private static List<CargoDependencyInfo> ParseLockFile(string content)
     {
-        var packages = new List<CargoDependencyInfo>();
-        foreach (Match match in LockPackagePattern().Matches(content))
+        var parsed = Toml.Parse(content);
+        if (parsed.HasErrors) throw new InvalidDataException($"Invalid Cargo.lock: {parsed.Diagnostics}");
+        var model = parsed.ToModel();
+        if (!model.TryGetValue("package", out var value) || value is not TomlTableArray tables) throw new InvalidDataException("Cargo.lock has no package array.");
+        var result = new List<CargoDependencyInfo>();
+        var registries = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var table in tables)
         {
-            var body = match.Groups["body"].Value;
-            var source = SourcePattern().Match(body);
-            if (!source.Success || !source.Groups["value"].Value.StartsWith("registry+", StringComparison.Ordinal)) continue;
-            var name = NamePattern().Match(body).Groups["value"].Value;
-            var version = VersionPattern().Match(body).Groups["value"].Value;
-            var checksum = ChecksumPattern().Match(body).Groups["value"].Value;
-            if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(version))
-                packages.Add(new CargoDependencyInfo { Name = name, Version = version, Checksum = checksum });
+            if (!table.TryGetValue("source", out var sourceValue)) continue;
+            if (sourceValue is not string source) throw new InvalidDataException("Invalid Cargo.lock source.");
+            if (!source.StartsWith("registry+", StringComparison.Ordinal)) continue;
+            registries.Add(source);
+            if (!table.TryGetValue("name", out var nameValue) || nameValue is not string name || !CratePattern().IsMatch(name) ||
+                !table.TryGetValue("version", out var versionValue) || versionValue is not string version || !VersionPattern().IsMatch(version) ||
+                !table.TryGetValue("checksum", out var checksumValue) || checksumValue is not string checksum || checksum.Length != 64 || !checksum.All(Uri.IsHexDigit))
+                throw new InvalidDataException("Registry dependencies need a valid name, version and SHA-256 checksum.");
+            result.Add(new CargoDependencyInfo { Name = name, Version = version, Checksum = checksum });
         }
-
-        return [.. packages.DistinctBy(item => $"{item.Name}:{item.Version}").OrderBy(item => item.Name).ThenBy(item => item.Version)];
+        if (registries.Count > 1) throw new InvalidDataException("Multiple source registries require separate fetch packages; registry identities must not be merged.");
+        return result.DistinctBy(x => (x.Name, x.Version)).OrderBy(x => x.Name, StringComparer.Ordinal).ThenBy(x => x.Version, StringComparer.Ordinal).ToList();
     }
 
-    private static Uri ResolveDownloadUri(string value, Uri indexBase)
-    {
-        if (Uri.TryCreate(value, UriKind.Absolute, out var absolute) && absolute.Scheme is "http" or "https") return absolute;
-        return new Uri(indexBase, value.TrimStart('/'));
-    }
-
-    private static string NormalizeDownloadTemplate(string template)
-    {
-        if (template.Contains("{crate}", StringComparison.Ordinal) && template.Contains("{version}", StringComparison.Ordinal)) return template;
-        var root = template.TrimEnd('/');
-        return $"{root}/{{crate}}/{{crate}}-{{version}}.crate";
-    }
-
-    private static string GetIndexPath(string name)
-    {
-        var lower = name.ToLowerInvariant();
-        return lower.Length switch
-        {
-            1 => $"1/{lower}", 2 => $"2/{lower}", 3 => $"3/{lower[0]}/{lower}",
-            _ => $"{lower[..2]}/{lower[2..4]}/{lower}"
-        };
-    }
-
-    private static Uri EnsureTrailingSlash(Uri uri) => uri.AbsoluteUri.EndsWith('/') ? uri : new Uri(uri.AbsoluteUri + "/");
+    private static string Prefix(string name) => name.Length switch { 1 => "1", 2 => "2", 3 => $"3/{name[0]}", _ => $"{name[..2]}/{name[2..4]}" };
+    private static string GetIndexPath(string name) => $"{Prefix(name)}/{name}";
 }
