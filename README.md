@@ -23,7 +23,7 @@ The server is published as a separate executable. For a framework-dependent depl
 
 ### Automated release builds
 
-GitHub Actions and Gitea Actions workflows are provided in `.github/workflows/release.yml` and `.gitea/workflows/release.yml`. Both build the server and CLI for `linux-x64`, `linux-arm64`, `win-x64` and `osx-arm64`, then create a release and attach one ZIP per platform when a `v*` tag is pushed. You can also run the build manually with `workflow_dispatch`; manual runs upload downloadable workflow artifacts without creating a release.
+GitHub Actions and Gitea Actions workflows are provided in `.github/workflows/release.yml` and `.gitea/workflows/release.yml`. Both build the server and CLI for `linux-x64`, `linux-arm64`, `win-x64` and `osx-arm64`, then create a release and attach one ZIP per platform when a `v*` tag is pushed. GitLab CI is provided in `.gitlab-ci.yml`; it verifies every pipeline and publishes a `linux-x64` tarball for `v*` tags. You can also run the build manually with `workflow_dispatch`; manual runs upload downloadable workflow artifacts without creating a release.
 
 Gitea repositories must define a repository secret named `GITEA_TOKEN` with permission to create releases and upload assets. Make sure the Gitea runner labels in the workflow (`ubuntu-latest`, `ubuntu-24.04-arm`, `windows-latest`, `macos-latest`) match runners available to your instance. GitHub's hosted `ubuntu-24.04-arm` runner may need to be replaced with a self-hosted runner label if unavailable on your GitHub plan.
 

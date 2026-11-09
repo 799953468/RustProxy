@@ -1,0 +1,45 @@
+image: mcr.microsoft.com/dotnet/sdk:11.0-preview
+
+stages:
+  - verify
+  - release
+
+variables:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+  NUGET_PACKAGES: "$CI_PROJECT_DIR/.nuget/packages"
+
+cache:
+  key:
+    files:
+      - RustProxy.Core/RustProxy.Core.csproj
+      - RustProxy.Server/RustProxy.Server.csproj
+  paths:
+    - .nuget/packages/
+
+verify:
+  stage: verify
+  script:
+    - dotnet --info
+    - dotnet restore RustProxy.slnx
+    - dotnet build RustProxy.slnx --configuration Release --no-restore
+    - git diff --check
+
+publish-linux:
+  stage: release
+  needs:
+    - verify
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/'
+    - when: never
+  script:
+    - dotnet restore RustProxy.slnx --runtime linux-x64
+    - mkdir -p artifacts/linux-x64/server artifacts/linux-x64/cli
+    - dotnet publish RustProxy.Server/RustProxy.Server.csproj --configuration Release --runtime linux-x64 --self-contained false --no-restore --output artifacts/linux-x64/server
+    - dotnet publish RustProxy.Cli/RustProxy.Cli.csproj --configuration Release --runtime linux-x64 --self-contained false --no-restore --output artifacts/linux-x64/cli
+    - tar -czf "RustProxy-${CI_COMMIT_TAG}-linux-x64.tar.gz" -C artifacts linux-x64
+  artifacts:
+    name: "RustProxy-${CI_COMMIT_TAG}-linux-x64"
+    paths:
+      - "RustProxy-${CI_COMMIT_TAG}-linux-x64.tar.gz"
+    expire_in: 30 days
