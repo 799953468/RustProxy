@@ -1,8 +1,10 @@
-# RustProxy v0.1.0
+# Changelog
+
+## v0.1.0
 
 Initial release of RustProxy, an offline package builder and mirror server for Cargo and rustup sources.
 
-## Highlights
+### Highlights
 
 - Package Cargo sparse indexes, crate archives, rustup manifests, and toolchain components into portable `.rpk` archives.
 - Normalize mirror download layouts into the standard Cargo cache structure.
@@ -12,7 +14,7 @@ Initial release of RustProxy, an offline package builder and mirror server for C
 - Add retry handling, cancellation support, and rollback for failed imports.
 - Add GitHub Actions and GitLab CI release builds for `linux-x64`, `linux-arm64`, `win-x64`, and `osx-arm64`.
 
-## Downloads
+### Downloads
 
 Each platform package contains the published server and CLI:
 

@@ -65,4 +65,4 @@ release:
   release:
     tag_name: "$CI_COMMIT_TAG"
     name: "RustProxy $CI_COMMIT_TAG"
-    description: RELEASE_NOTES.md
+    description: CHANGELOG.md

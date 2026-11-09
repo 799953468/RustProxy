@@ -71,7 +71,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/RustProxy-${{ matrix.rid }}.zip
-          body_path: RELEASE_NOTES.md
+          body_path: CHANGELOG.md
           generate_release_notes: false
 
       - name: Attach to Gitea Release
