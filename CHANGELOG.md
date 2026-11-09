@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.1.2
+
+### Security
+
+- Protect server imports with administrator authentication, require HTTPS for remote credentials, and reject revoked credentials during an upload.
+- Harden package validation against path traversal, symbolic links, duplicate entries, malformed ZIP/ZIP64 directories, and inconsistent manifests or checksums.
+- Enforce configurable limits on compressed packages, expanded files, manifests, ZIP directories, and file counts, with bounded concurrent imports and import deadlines.
+
+### Storage and reliability
+
+- Store verified files as immutable SHA-256 objects so overlapping imports preserve each package's original contents and avoid duplicating identical bytes.
+- Add rollback and recovery for interrupted imports, migrate legacy SQLite metadata and verified files, and prevent multiple servers from sharing one data directory.
+- Check stored object integrity in the background and report database, disk-space, and integrity readiness through `/health/ready`; retain `/health` for liveness.
+- Use indexed file lookups and bounded metadata caching, support conditional and range requests, and apply immutable caching to package-scoped resources.
+
+### Cargo and rustup
+
+- Resolve Cargo workspace lockfiles correctly, verify crate checksums, reject conflicting registry metadata, and download crates with bounded concurrency.
+- Normalize upstream mirror download templates into the standard Cargo layout and generate package-scoped registry configuration.
+- Correct rustup channel, dated-version, component, and updater downloads; verify downloaded content and improve transient HTTP retry and cancellation handling.
+- Tighten fetch configuration validation and clean up cancelled external Cargo commands.
+
+### Build and CI
+
+- Add locked NuGet restores and a regression suite with 73 passing tests covering package security, storage recovery, authentication, downloads, configuration, and HTTP endpoints.
+- Add GitHub CI for branch commits and pull requests on Linux x64, Linux ARM64, Windows x64, and macOS ARM64; reuse the same verification before release packaging.
+- Add GitLab commit, merge request, and tag verification, suppress duplicate branch pipelines for open merge requests, and retain TRX test reports for 14 days on both platforms.
+
+### Upgrade and downloads
+
+- Configure `Administration__ApiKey` with a secret of at least 32 characters to enable imports. Use the `admin` username with this secret and HTTPS for remote administration.
+- Back up the deployment before upgrading. The first startup copies legacy metadata into `data/metadata/rustproxy.db` and migrates files whose stored checksums match into `data/objects`; retain the original data until migration is verified. Reimport original packages if legacy bytes were already overwritten.
+- Run one server instance per data directory. Configure `PublicBaseUrl` when a reverse proxy changes the public origin or path prefix.
+- Packages contain the server and CLI for `linux-x64`, `linux-arm64`, `win-x64`, and `osx-arm64`, with SHA-256 checksum files. Install the matching .NET 11 RC3 runtime; the packages remain framework-dependent.
+
 ## v0.1.1
 
 ### Changes
