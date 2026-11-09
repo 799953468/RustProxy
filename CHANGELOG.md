@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.1
+
+### Changes
+
+- Pin .NET SDK `11.0.100-rc.3.26522.148` across local builds, GitHub Actions, and GitLab CI to support C# 15 consistently.
+- Build `linux-x64`, `linux-arm64`, `win-x64`, and `osx-arm64` packages on GitLab branch pipelines as well as version tags.
+- Include the branch name and commit SHA in branch package names.
+- Use `CHANGELOG.md` for release descriptions and add the MIT license.
+
+### Downloads
+
+Each platform package contains the server and CLI. Install the matching .NET 11 RC3 runtime on the destination machine; these packages are framework-dependent.
+
 ## v0.1.0
 
 Initial release of RustProxy, an offline package builder and mirror server for Cargo and rustup sources.
