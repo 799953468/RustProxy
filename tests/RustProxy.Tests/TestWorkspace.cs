@@ -17,7 +17,7 @@ internal sealed class TestWorkspace : IDisposable
 {
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "rustproxy-tests-" + Guid.NewGuid().ToString("N"));
     public TestWorkspace() => Directory.CreateDirectory(Root);
-    public string PathFor(string relative) => Path.Combine(Root, relative);
+    public string PathFor(string relative) => Path.GetFullPath(Path.Combine(Root, relative));
     public void Dispose() => PackageStore.DeleteTemporary(Root);
 
     public const string AdministratorKey = "test-only-administrator-secret-32-characters";

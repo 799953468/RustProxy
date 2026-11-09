@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.3
+
+### Changes
+
+- Include the security, storage recovery, Cargo/rustup synchronization, and CI improvements described in v0.1.2 below.
+- Normalize test workspace paths with the operating system's path rules, fixing Windows failures in the legacy database migration and relative TOML configuration tests.
+- Remove the unsupported `include-prerelease` input from GitHub SDK setup; `global.json` continues to select the pinned .NET 11 RC3 SDK.
+
+### Release and upgrade notes
+
+- GitHub publication of v0.1.2 was blocked by the Windows test fixture path assertions; v0.1.3 fixes that release gate without replacing the existing tag.
+- The v0.1.2 administrator configuration, data migration, four-platform downloads, and .NET 11 RC3 runtime requirements also apply to this version.
+
 ## v0.1.2
 
 ### Security
