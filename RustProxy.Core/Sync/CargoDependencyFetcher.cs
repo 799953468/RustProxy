@@ -175,7 +175,7 @@ public sealed partial class CargoDependencyFetcher(
         var path = uri.AbsolutePath.StartsWith(basePath + "/", StringComparison.Ordinal)
             ? uri.AbsolutePath[(basePath.Length + 1)..]
             : uri.AbsolutePath.TrimStart('/');
-        return path;
+        return Uri.UnescapeDataString(path);
     }
 
     private static string GetIndexPath(string name)

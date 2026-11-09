@@ -1,0 +1,26 @@
+# 示例2: 简化 TOML 格式
+# 更易读的格式，特别适合简单场景
+
+name = "offline-rust-linux"
+output = "artifacts/offline-rust-linux.rpk"
+cargoProject = "./my-rust-project"
+cargoIndexUrl = "https://index.crates.io/"
+cargoDownloadUrl = "https://static.crates.io/crates/{crate}/{crate}-{version}.crate"
+retryCount = 5
+retryDelaySeconds = 3
+
+# 简化的工具链格式: "版本/目标"
+# 或者用表数组的完整格式
+toolchains = [
+  "1.88.0/x86_64-unknown-linux-gnu",
+  "stable/aarch64-unknown-linux-gnu"
+]
+
+# 或者用表数组:
+# [[toolchains]]
+# version = "1.88.0"
+# target = "x86_64-unknown-linux-gnu"
+#
+# [[toolchains]]
+# version = "stable"
+# target = "aarch64-unknown-linux-gnu"
