@@ -52,7 +52,7 @@ public sealed partial class CargoDependencyFetcher(
         var sourceConfig = JsonNode.Parse(configText)?.AsObject() ?? throw new InvalidDataException("Cargo index config.json is not valid JSON.");
         var upstreamDownloadTemplate = downloadUrlTemplate ?? sourceConfig["dl"]?.GetValue<string>() ?? throw new InvalidDataException("Cargo index config.json has an empty dl URL.");
         var dlTemplate = NormalizeDownloadTemplate(upstreamDownloadTemplate);
-        var localDownloadTemplate = RewriteToLocalTemplate(dlTemplate, indexBase);
+        const string localDownloadTemplate = "crates/{crate}/{crate}-{version}.crate";
         var localConfig = new JsonObject { ["dl"] = $"/cargo/{localDownloadTemplate}", ["api"] = "/cargo" };
         var packages = ParseLockFile(await File.ReadAllTextAsync(lockPath, cancellationToken));
         var cargoRoot = Path.Combine(destinationDirectory, "cargo");
@@ -75,15 +75,9 @@ public sealed partial class CargoDependencyFetcher(
             };
             var expandedTemplate = TemplatePattern().Replace(dlTemplate, value => templateValues[value.Groups["key"].Value]);
             var downloadUri = ResolveDownloadUri(expandedTemplate, indexBase);
-            var downloadPath = downloadUri.AbsolutePath.TrimStart('/');
-            if (downloadUri.Host.Equals(indexBase.Host, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(indexBase.AbsolutePath.Trim('/')))
-            {
-                var basePath = indexBase.AbsolutePath.Trim('/');
-                if (downloadPath.StartsWith(basePath + "/", StringComparison.Ordinal))
-                    downloadPath = downloadPath[(basePath.Length + 1)..];
-            }
-
-            var cratePath = Path.GetFullPath(Path.Combine(cargoRoot, Uri.UnescapeDataString(downloadPath).Replace('/', Path.DirectorySeparatorChar)));
+            var downloadPath = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "crates/{0}/{0}-{1}.crate", crateName, dependency.Version);
+            var cratePath = Path.GetFullPath(Path.Combine(cargoRoot, downloadPath.Replace('/', Path.DirectorySeparatorChar)));
             if (!cratePath.StartsWith(Path.GetFullPath(cargoRoot) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
                 throw new InvalidDataException("Cargo dl template resolved outside the package source tree.");
             Directory.CreateDirectory(Path.GetDirectoryName(cratePath)!);
@@ -166,16 +160,6 @@ public sealed partial class CargoDependencyFetcher(
         if (template.Contains("{crate}", StringComparison.Ordinal) && template.Contains("{version}", StringComparison.Ordinal)) return template;
         var root = template.TrimEnd('/');
         return $"{root}/{{crate}}/{{crate}}-{{version}}.crate";
-    }
-
-    private static string RewriteToLocalTemplate(string template, Uri indexBase)
-    {
-        if (!Uri.TryCreate(template, UriKind.Absolute, out var uri)) return template.TrimStart('/');
-        var basePath = indexBase.AbsolutePath.TrimEnd('/');
-        var path = uri.AbsolutePath.StartsWith(basePath + "/", StringComparison.Ordinal)
-            ? uri.AbsolutePath[(basePath.Length + 1)..]
-            : uri.AbsolutePath.TrimStart('/');
-        return Uri.UnescapeDataString(path);
     }
 
     private static string GetIndexPath(string name)

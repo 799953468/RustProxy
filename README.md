@@ -112,7 +112,7 @@ cargo/
       abc-1.2.3.crate
 ```
 
-`cargoIndexUrl` selects the sparse index. `cargoDownloadUrl` is optional; when omitted, the `dl` template from the upstream `config.json` is used. The generated package `config.json` rewrites that template to `/cargo/...`, so offline Cargo requests stay inside RustProxy while the relative directory structure remains the same as the upstream source. Cargo.lock checksums are verified after each archive download.
+`cargoIndexUrl` selects the sparse index. `cargoDownloadUrl` is optional; when omitted, the `dl` template from the upstream `config.json` is used. RustProxy follows that upstream template to download each archive, then stores it at the standard `cargo/crates/{crate}/{crate}-{version}.crate` path and writes a local `config.json` that points to that normalized layout. This also accepts mirrors that use a different download path, such as `/crates/{crate}/{version}/download`. Cargo.lock checksums are verified after each archive download.
 
 This is a shared registry source package and can be used by multiple projects. Configure Cargo with the server's sparse URL:
 
