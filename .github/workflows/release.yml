@@ -32,7 +32,7 @@ jobs:
       - name: Install .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 11.0.x
+          global-json-file: global.json
           include-prerelease: true
 
       - name: Build and publish

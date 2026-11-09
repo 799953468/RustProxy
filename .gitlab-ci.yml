@@ -1,4 +1,4 @@
-image: mcr.microsoft.com/dotnet/sdk:11.0-preview
+image: mcr.microsoft.com/dotnet/sdk:11.0.100-rc.3
 
 stages:
   - verify
@@ -38,17 +38,21 @@ publish:
       - RID: osx-arm64
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v/'
-    - when: never
+      variables:
+        PACKAGE_VERSION: "$CI_COMMIT_TAG"
+    - if: '$CI_COMMIT_BRANCH'
+      variables:
+        PACKAGE_VERSION: "$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
   script:
     - dotnet restore RustProxy.slnx --runtime "$RID"
     - mkdir -p "artifacts/$RID/server" "artifacts/$RID/cli"
     - dotnet publish RustProxy.Server/RustProxy.Server.csproj --configuration Release --runtime "$RID" --self-contained false --no-restore --output "artifacts/$RID/server"
     - dotnet publish RustProxy.Cli/RustProxy.Cli.csproj --configuration Release --runtime "$RID" --self-contained false --no-restore --output "artifacts/$RID/cli"
-    - tar -czf "RustProxy-${CI_COMMIT_TAG}-${RID}.tar.gz" -C artifacts "$RID"
+    - tar -czf "RustProxy-${PACKAGE_VERSION}-${RID}.tar.gz" -C artifacts "$RID"
   artifacts:
-    name: "RustProxy-${CI_COMMIT_TAG}-${RID}"
+    name: "RustProxy-${PACKAGE_VERSION}-${RID}"
     paths:
-      - "RustProxy-${CI_COMMIT_TAG}-${RID}.tar.gz"
+      - "RustProxy-${PACKAGE_VERSION}-${RID}.tar.gz"
     expire_in: 30 days
 
 release:

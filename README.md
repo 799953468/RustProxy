@@ -23,11 +23,11 @@ The server is published as a separate executable. For a framework-dependent depl
 
 ### Automated release builds
 
-GitHub Actions and Gitea Actions workflows are provided in `.github/workflows/release.yml` and `.gitea/workflows/release.yml`. The GitHub workflow builds the server and CLI for `linux-x64`, `linux-arm64`, `win-x64` and `osx-arm64`, then creates a release and attaches one ZIP per platform when a `v*` tag is pushed. GitLab CI is provided in `.gitlab-ci.yml`; it verifies every pipeline, publishes one tarball as a job artifact for each of the same four platforms on `v*` tags, and creates a release after all packages succeed. GitHub and GitLab releases use `CHANGELOG.md` as their description. GitLab package artifacts expire after 30 days. You can also run the GitHub build manually with `workflow_dispatch`; manual runs upload downloadable workflow artifacts without creating a release.
+GitHub Actions and Gitea Actions workflows are provided in `.github/workflows/release.yml` and `.gitea/workflows/release.yml`. The GitHub workflow builds the server and CLI for `linux-x64`, `linux-arm64`, `win-x64` and `osx-arm64`, then creates a release and attaches one ZIP per platform when a `v*` tag is pushed. GitLab CI is provided in `.gitlab-ci.yml`; it verifies and packages the same four platforms on branch pushes and `v*` tags. Branch artifacts include the branch slug and short commit SHA in their names. A `v*` tag also creates a release after all packages succeed. GitHub and GitLab releases use `CHANGELOG.md` as their description. GitLab package artifacts expire after 30 days. You can also run the GitHub build manually with `workflow_dispatch`; manual runs upload downloadable workflow artifacts without creating a release.
 
 Gitea repositories must define a repository secret named `GITEA_TOKEN` with permission to create releases and upload assets. Make sure the Gitea runner labels in the workflow (`ubuntu-latest`, `ubuntu-24.04-arm`, `windows-latest`, `macos-latest`) match runners available to your instance. GitHub's hosted `ubuntu-24.04-arm` runner may need to be replaced with a self-hosted runner label if unavailable on your GitHub plan.
 
-The workflows use the .NET 11 preview SDK because the projects currently target `net11.0`.
+The projects target `net11.0` and use C# 15. `global.json` selects .NET SDK `11.0.100-rc.3.26522.148`; GitHub Actions installs this SDK and GitLab CI uses the matching `11.0.100-rc.3` container image. Older .NET 11 previews may not recognize the C# 15 language version.
 
 Start the published server:
 
