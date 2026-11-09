@@ -11,11 +11,13 @@ var packageLimits = builder.Configuration.GetSection("PackageLimits").Get<RustPr
 packageLimits.Validate();
 builder.Services.AddSingleton(packageLimits);
 builder.Services.AddControllers();
+builder.Services.AddSingleton<AdministratorAccess>();
 builder.Services.AddMemoryCache();
 builder.Services.AddAuthentication(AdministratorAuthenticationHandler.SchemeName)
     .AddScheme<AuthenticationSchemeOptions, AdministratorAuthenticationHandler>(AdministratorAuthenticationHandler.SchemeName, _ => { });
 builder.Services.AddAuthorization(options => options.AddPolicy("Administrator", policy => policy.RequireAuthenticatedUser().RequireRole("Administrator")));
 builder.Services.AddCascadingAuthenticationState();
+using var storageLease = new PackageStorageLease(builder.Environment.ContentRootPath);
 var databasePath = DatabaseStorage.Prepare(builder.Environment.ContentRootPath);
 builder.Services.AddSingleton<ISqlSugarClient>(_ => new SqlSugarScope(new ConnectionConfig
 {
@@ -25,6 +27,7 @@ builder.Services.AddSingleton<ISqlSugarClient>(_ => new SqlSugarScope(new Connec
 }));
 builder.Services.AddHostedService<PackageMetadataInitializer>();
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+builder.Services.AddScoped<AuthenticationStateProvider, AdministratorAuthenticationStateProvider>();
 builder.Services.AddSingleton<PackageCatalog>();
 
 var app = builder.Build();

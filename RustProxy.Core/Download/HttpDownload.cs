@@ -18,13 +18,14 @@ public static class HttpDownload
     public static async Task DownloadAsync(HttpClient client, Uri uri, string path, string? expectedHash, CancellationToken cancellationToken = default,
         long maximumBytes = 4L * 1024 * 1024 * 1024, bool sameOrigin = false)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
+        if (expectedHash is not null && (expectedHash.Length != 64 || !expectedHash.All(Uri.IsHexDigit)))
+            throw new InvalidDataException("A download checksum must be a SHA-256 digest.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromMinutes(30));
         var token = deadline.Token;
         Validate(uri);
         using var response = await SendAsync(client, uri, sameOrigin, token);
-        var final = Validate(response.RequestMessage?.RequestUri ?? uri);
-        if (sameOrigin && (final.Scheme != uri.Scheme || final.Authority != uri.Authority)) throw new InvalidDataException("Cross-origin download redirects are not allowed.");
         if (response.Content.Headers.ContentLength > maximumBytes) throw new InvalidDataException("HTTP resource exceeds download quota.");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         PathSafety.RejectLink(path);
@@ -45,10 +46,10 @@ public static class HttpDownload
     /// <summary>Reads bounded metadata bytes with a short end-to-end timeout.</summary>
     public static async Task<byte[]> ReadBytesAsync(HttpClient client, Uri uri, CancellationToken cancellationToken = default, long maximumBytes = 16 * 1024 * 1024)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromMinutes(2));
         using var response = await SendAsync(client, uri, false, deadline.Token);
-        Validate(response.RequestMessage?.RequestUri ?? uri);
         if (response.Content.Headers.ContentLength > maximumBytes) throw new InvalidDataException("Metadata exceeds download quota.");
         await using var input = await response.Content.ReadAsStreamAsync(deadline.Token);
         using var output = new MemoryStream();
@@ -66,18 +67,24 @@ public static class HttpDownload
         for (var redirect = 0; redirect <= 5; redirect++)
         {
             var response = await client.GetAsync(current, HttpCompletionOption.ResponseHeadersRead, token);
-            if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+            try
             {
-                var location = response.Headers.Location;
-                response.Dispose();
-                if (location is null || redirect == 5) throw new InvalidDataException("Invalid or excessive HTTP redirects.");
-                var next = Validate(new Uri(current, location));
-                if ((sameOrigin && (next.Scheme != uri.Scheme || next.Authority != uri.Authority)) || (current.Scheme == "https" && next.Scheme != "https"))
-                    throw new InvalidDataException("Unsafe HTTP redirect.");
-                current = next;
-                continue;
+                // Also validate the final URI of caller-provided clients that follow redirects automatically.
+                var final = Validate(response.RequestMessage?.RequestUri ?? current);
+                CheckRedirect(uri, current, final, sameOrigin);
+                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                {
+                    var location = response.Headers.Location;
+                    if (location is null || redirect == 5) throw new InvalidDataException("Invalid or excessive HTTP redirects.");
+                    var next = Validate(new Uri(final, location));
+                    CheckRedirect(uri, final, next, sameOrigin);
+                    current = next;
+                    response.Dispose();
+                    continue;
+                }
+                response.EnsureSuccessStatusCode();
+                return response;
             }
-            try { response.EnsureSuccessStatusCode(); return response; }
             catch (HttpRequestException exception)
             {
                 var retry = response.Headers.RetryAfter;
@@ -86,7 +93,14 @@ public static class HttpDownload
                 response.Dispose();
                 throw;
             }
+            catch { response.Dispose(); throw; }
         }
         throw new InvalidDataException("Too many HTTP redirects.");
+    }
+
+    private static void CheckRedirect(Uri origin, Uri previous, Uri next, bool sameOrigin)
+    {
+        if (sameOrigin && (next.Scheme != origin.Scheme || next.Authority != origin.Authority) || previous.Scheme == "https" && next.Scheme != "https")
+            throw new InvalidDataException("Unsafe HTTP redirect.");
     }
 }

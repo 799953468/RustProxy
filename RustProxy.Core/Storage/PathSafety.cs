@@ -17,7 +17,7 @@ public static class PathSafety
                 segment.Any(c => char.IsControl(c) || ":<>\"|?*".Contains(c)) ||
                 stem.Equals("CON", StringComparison.OrdinalIgnoreCase) || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
                 stem.Equals("AUX", StringComparison.OrdinalIgnoreCase) || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
-                stem.Length == 4 && (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) || stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) && stem[3] is >= '0' and <= '9')
+                stem.Length == 4 && (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) || stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) && (stem[3] is >= '0' and <= '9' or '¹' or '²' or '³'))
                 throw new InvalidDataException($"Unsafe resource path: {path}");
         }
         if (sourceOnly && (segments.Length < 2 || segments[0] is not ("cargo" or "rustup")))

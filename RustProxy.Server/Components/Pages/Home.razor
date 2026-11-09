@@ -6,7 +6,7 @@
 
 <div class="workspace-head"><div><p class="eyebrow">Offline source registry</p><h1>Available sources</h1><p class="lede">Cargo dependencies and Rust toolchains available to offline clients.</p></div><a class="button button-primary" href="import" data-enhance-nav="false">Import package</a></div>
 
-<div class="stat-strip"><div><strong>@dependencies.Count</strong><span>Cargo crates</span></div><div><strong>@toolchains.Count</strong><span>Toolchains</span></div><div><strong>@fileCount</strong><span>Source files</span></div><div><strong>Ready</strong><span>Source status</span></div></div>
+<div class="stat-strip"><div><strong>@dependencies.Count</strong><span>Cargo crates</span></div><div><strong>@toolchains.Count</strong><span>Toolchains</span></div><div><strong>@fileCount</strong><span>Source files</span></div><div><strong>@SourceStatus</strong><span>Source status</span></div></div>
 
 <div class="source-columns">
     <section class="section-block"><div class="section-heading"><h2>Cargo dependencies</h2><span>@dependencies.Count crates</span></div>@if (dependencies.Count == 0){<div class="empty-state compact"><h3>No Cargo dependencies</h3><p>Import a package created from a Cargo.lock project.</p></div>}else{<div class="dependency-list virtual-dependency-list"><Virtualize Items="dependencies" Context="dependency" ItemSize="52"><div class="dependency-row"><span class="package-icon">CRG</span><span class="dependency-name">@dependency.Name</span><code>@string.Join(", ", dependency.Versions)</code></div></Virtualize></div>}</section>
@@ -17,6 +17,7 @@
     private List<CargoDependencyGroup> dependencies = [];
     private List<RustToolchainInfo> toolchains = [];
     private int fileCount;
+    private string SourceStatus => Catalog.AuditFailures switch { < 0 => "Checking", 0 => "Ready", _ => "Unavailable" };
     private sealed record CargoDependencyGroup(string Name, List<string> Versions);
     protected override async Task OnInitializedAsync()
     {

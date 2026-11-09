@@ -100,6 +100,81 @@ public sealed class DownloadTests
     }
 
     [TestMethod]
+    public async Task ConflictingLockfileChecksumsAreRejectedBeforeNetworkAccess()
+    {
+        using var workspace = new TestWorkspace();
+        await File.WriteAllTextAsync(workspace.PathFor("Cargo.lock"), LockPackage("demo", "1.0.0") +
+            LockPackage("demo", "1.0.0").Replace(TestWorkspace.Hash("crate"), TestWorkspace.Hash("different")));
+        var handler = new FixtureHandler(_ => new StringContent("unexpected"));
+        using var client = new HttpClient(handler);
+        var logger = new SilentLogger();
+        var action = () => new CargoDependencyFetcher(client, new RetryExecutor(logger), logger)
+            .FetchAsync(workspace.Root, workspace.PathFor("output"), "https://fixture.invalid/");
+        await action.Should().ThrowAsync<InvalidDataException>();
+        handler.Paths.Should().BeEmpty();
+    }
+
+    [DataTestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task AutomaticallyRedirectedResponsesCannotDowngradeHttps(bool metadata)
+    {
+        using var workspace = new TestWorkspace();
+        using var client = new HttpClient(new ResponseHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("untrusted"), RequestMessage = new HttpRequestMessage(HttpMethod.Get, "http://fixture.invalid/final")
+        }));
+        var action = async () =>
+        {
+            if (metadata) await HttpDownload.ReadBytesAsync(client, new Uri("https://fixture.invalid/original"));
+            else await HttpDownload.DownloadAsync(client, new Uri("https://fixture.invalid/original"), workspace.PathFor("output"), null);
+        };
+        await action.Should().ThrowAsync<InvalidDataException>();
+        File.Exists(workspace.PathFor("output")).Should().BeFalse();
+    }
+
+    [DataTestMethod]
+    [DataRow("http://fixture.invalid/unsafe")]
+    [DataRow("https://another.invalid/unsafe")]
+    [DataRow("file:///tmp/unsafe")]
+    public async Task UnsafeManualRedirectIsRejectedBeforeFollowingIt(string location)
+    {
+        using var workspace = new TestWorkspace();
+        var requests = 0;
+        using var client = new HttpClient(new ResponseHandler(request =>
+        {
+            requests++;
+            var response = new HttpResponseMessage(HttpStatusCode.Redirect) { RequestMessage = request };
+            response.Headers.Location = new Uri(location);
+            return response;
+        }));
+        var action = () => HttpDownload.DownloadAsync(client, new Uri("https://fixture.invalid/original"), workspace.PathFor("output"), null, sameOrigin: true);
+        await action.Should().ThrowAsync<InvalidDataException>();
+        requests.Should().Be(1);
+    }
+
+    [TestMethod]
+    public async Task RelativeRedirectUsesTheCurrentResponseOrigin()
+    {
+        using var workspace = new TestWorkspace();
+        var requests = new List<string>();
+        using var client = new HttpClient(new ResponseHandler(request =>
+        {
+            requests.Add(request.RequestUri!.AbsolutePath);
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = request, Content = new StringContent("fixture") };
+            if (requests.Count == 1)
+            {
+                response.StatusCode = HttpStatusCode.Redirect;
+                response.Headers.Location = new Uri("../final", UriKind.Relative);
+            }
+            return response;
+        }));
+        await HttpDownload.DownloadAsync(client, new Uri("https://fixture.invalid/parent/original"), workspace.PathFor("output"), TestWorkspace.Hash("fixture"), sameOrigin: true);
+        requests.Should().Equal("/parent/original", "/final");
+        (await File.ReadAllTextAsync(workspace.PathFor("output"))).Should().Be("fixture");
+    }
+
+    [TestMethod]
     public async Task ExplicitDownloadRejectsAbsoluteAndEncodedPaths()
     {
         using var workspace = new TestWorkspace();
@@ -128,5 +203,10 @@ public sealed class DownloadTests
     {
         public void Info(string message) { }
         public void Retry(string operation, int attempt, int maxAttempts, Exception exception, TimeSpan delay) { }
+    }
+
+    private sealed class ResponseHandler(Func<HttpRequestMessage, HttpResponseMessage> response) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(response(request));
     }
 }

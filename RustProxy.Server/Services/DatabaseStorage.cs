@@ -6,13 +6,16 @@ namespace RustProxy.Server.Services;
 /// <summary>Separates metadata from resource objects and preserves the original legacy database during migration.</summary>
 public static class DatabaseStorage
 {
-    /// <summary>Migrates optional columns in existing SQLite tables while retaining columns, indexes and triggers.</summary>
+    /// <summary>Migrates optional columns and indexes while retaining existing data, indexes and triggers.</summary>
     public static void UpgradeOptionalColumns(string connectionString)
     {
         using var connection = new SqliteConnection(connectionString);
         connection.Open();
         MakeNullable(connection, "Packages", "Source");
         MakeNullable(connection, "PackageCargoDependencies", "Checksum");
+        using var index = connection.CreateCommand();
+        index.CommandText = "CREATE INDEX IF NOT EXISTS IX_PackageFiles_NormalizedSha256 ON PackageFiles(lower(Sha256))";
+        index.ExecuteNonQuery();
     }
 
     private static void MakeNullable(SqliteConnection connection, string table, string optionalColumn)

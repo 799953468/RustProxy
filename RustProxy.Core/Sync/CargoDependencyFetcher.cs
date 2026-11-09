@@ -29,7 +29,7 @@ public sealed partial class CargoDependencyFetcher(HttpClient httpClient, RetryE
         var root = Path.GetFullPath(projectDirectory);
         var lockPath = Path.Combine(root, "Cargo.lock");
         var indexBase = HttpDownload.Validate(new Uri(indexUrl.EndsWith('/') ? indexUrl : indexUrl + "/"));
-        if (!File.Exists(lockPath)) await new CargoCommandResolver(logger).GenerateLockAsync(root, cancellationToken);
+        if (!File.Exists(lockPath)) lockPath = await new CargoCommandResolver(logger).ResolveLockFileAsync(root, cancellationToken);
         var packages = ParseLockFile(await File.ReadAllTextAsync(lockPath, cancellationToken));
         logger.Info($"Cargo: resolved {packages.Count} registry archives; Git/path dependencies are not included in the mirror.");
         var configText = await retryExecutor.ExecuteAsync("Cargo index config.json", () => HttpDownload.ReadTextAsync(httpClient, new Uri(indexBase, "config.json"), cancellationToken, 1024 * 1024),
@@ -98,6 +98,9 @@ public sealed partial class CargoDependencyFetcher(HttpClient httpClient, RetryE
             result.Add(new CargoDependencyInfo { Name = name, Version = version, Checksum = checksum });
         }
         if (registries.Count > 1) throw new InvalidDataException("Multiple source registries require separate fetch packages; registry identities must not be merged.");
+        foreach (var duplicate in result.GroupBy(x => (Name: x.Name.ToLowerInvariant(), x.Version)))
+            if (duplicate.Select(x => (x.Name, Checksum: x.Checksum!.ToLowerInvariant())).Distinct().Skip(1).Any())
+                throw new InvalidDataException("Cargo.lock contains conflicting dependency names or checksums.");
         return result.DistinctBy(x => (x.Name, x.Version)).OrderBy(x => x.Name, StringComparer.Ordinal).ThenBy(x => x.Version, StringComparer.Ordinal).ToList();
     }
 

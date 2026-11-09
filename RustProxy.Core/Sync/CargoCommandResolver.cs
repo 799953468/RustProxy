@@ -16,15 +16,22 @@ internal sealed class CargoCommandResolver(IFetchLogger logger)
     private static readonly HttpClient Client = new SourceHttpClient();
     private static readonly SemaphoreSlim CacheLock = new(1, 1);
 
-    public async Task GenerateLockAsync(string projectDirectory, CancellationToken cancellationToken)
+    public async Task<string> ResolveLockFileAsync(string projectDirectory, CancellationToken cancellationToken)
     {
         var manifest = Path.Combine(projectDirectory, "Cargo.toml");
         if (!File.Exists(manifest)) throw new FileNotFoundException("Cargo.toml is required.", manifest);
         var cargo = FindCargoOnPath() ?? await GetCachedCargoAsync(cancellationToken);
+        var located = await ExternalCommandRunner.RunAsync(cargo,
+            ["locate-project", "--workspace", "--manifest-path", manifest, "--message-format", "plain"], projectDirectory, cancellationToken);
+        var workspaceManifest = located.StandardOutput.Trim();
+        if (!Path.IsPathFullyQualified(workspaceManifest) || !File.Exists(workspaceManifest))
+            throw new InvalidDataException("Cargo did not return a valid workspace manifest path.");
+        var lockPath = Path.Combine(Path.GetDirectoryName(workspaceManifest)!, "Cargo.lock");
         // Cargo resolves workspace members, relative dependencies and custom targets from their actual locations.
-        await ExternalCommandRunner.RunAsync(cargo, ["generate-lockfile", "--manifest-path", manifest], projectDirectory, cancellationToken);
-        if (!File.Exists(Path.Combine(projectDirectory, "Cargo.lock")))
-            throw new InvalidDataException("Cargo generated no Cargo.lock next to this manifest. For a workspace member, fetch the workspace root.");
+        if (!File.Exists(lockPath))
+            await ExternalCommandRunner.RunAsync(cargo, ["generate-lockfile", "--manifest-path", manifest], projectDirectory, cancellationToken);
+        if (!File.Exists(lockPath)) throw new InvalidDataException("Cargo did not generate a workspace lockfile.");
+        return lockPath;
     }
 
     private async Task<string> GetCachedCargoAsync(CancellationToken cancellationToken)

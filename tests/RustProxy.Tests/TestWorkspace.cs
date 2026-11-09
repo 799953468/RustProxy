@@ -5,9 +5,11 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Configuration;
 using RustProxy.Core.Package;
 using RustProxy.Core.Serialization;
 using RustProxy.Core.Storage;
+using RustProxy.Server.Security;
 
 namespace RustProxy.Tests;
 
@@ -18,7 +20,10 @@ internal sealed class TestWorkspace : IDisposable
     public string PathFor(string relative) => Path.Combine(Root, relative);
     public void Dispose() => PackageStore.DeleteTemporary(Root);
 
-    public static ClaimsPrincipal Administrator => new(new ClaimsIdentity([new Claim(ClaimTypes.Name, "test-admin"), new Claim(ClaimTypes.Role, "Administrator")], "Test"));
+    public const string AdministratorKey = "test-only-administrator-secret-32-characters";
+    public static AdministratorAccess Access { get; } = new(new ConfigurationBuilder().AddInMemoryCollection(
+        new Dictionary<string, string?> { ["Administration:ApiKey"] = AdministratorKey }).Build());
+    public static ClaimsPrincipal Administrator => Access.Authenticate("admin", AdministratorKey)!;
     public static string Hash(string content) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
 
     public static MemoryStream Package(string path = "cargo/index/example", string content = "fixture", string? checksum = null, long? length = null, string? source = null)

@@ -9,13 +9,14 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using RustProxy.Server.Services;
+using RustProxy.Server.Security;
 
 namespace RustProxy.Tests;
 
 [TestClass]
 public sealed class HttpIntegrationTests
 {
-    private const string TestKey = "test-only-administrator-secret-32-characters";
+    private const string TestKey = TestWorkspace.AdministratorKey;
 
     [TestMethod]
     public async Task AdministrationChallengesAnonymousClientsAndAcceptsConfiguredCredentials()
@@ -52,7 +53,7 @@ public sealed class HttpIntegrationTests
         using var client = CreateClient(factory);
         var catalog = factory.Services.GetRequiredService<PackageCatalog>();
         using var package = TestWorkspace.Package("cargo/index/a", "0123456789");
-        var imported = await catalog.ImportAsync(package, "fixture.rpk", TestWorkspace.Administrator);
+        var imported = await catalog.ImportAsync(package, "fixture.rpk", factory.Services.GetRequiredService<AdministratorAccess>().Authenticate("admin", TestKey)!);
         using var initial = await client.GetAsync("/cargo/index/a");
         initial.StatusCode.Should().Be(HttpStatusCode.OK);
         initial.Headers.CacheControl!.NoCache.Should().BeTrue();
@@ -76,13 +77,35 @@ public sealed class HttpIntegrationTests
     }
 
     [TestMethod]
+    public async Task CorruptObjectsAreUnavailableAndReadinessRecoversAfterReimport()
+    {
+        using var workspace = new TestWorkspace();
+        await using var factory = CreateFactory(workspace.Root);
+        using var client = CreateClient(factory);
+        var catalog = factory.Services.GetRequiredService<PackageCatalog>();
+        var actor = factory.Services.GetRequiredService<AdministratorAccess>().Authenticate("admin", TestKey)!;
+        using var package = TestWorkspace.Package(content: "original");
+        var imported = await catalog.ImportAsync(package, "fixture.rpk", actor);
+        await catalog.AuditAsync(default);
+        var stored = await catalog.FindPackageFileAsync(imported.Id, "cargo/index/example");
+        await File.WriteAllTextAsync(stored!.Path, "tampered");
+        File.SetLastWriteTimeUtc(stored.Path, DateTime.UtcNow.AddMinutes(1));
+        (await client.GetAsync("/cargo/index/example")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await client.GetAsync("/health/ready")).StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        package.Position = 0;
+        await catalog.ImportAsync(package, "repair.rpk", actor);
+        (await client.GetStringAsync($"/packages/{imported.Id}/cargo/index/example")).Should().Be("original");
+        (await client.GetAsync("/health/ready")).StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [TestMethod]
     public async Task SparseIndexConfigurationUsesAnAbsoluteDownloadUrl()
     {
         using var workspace = new TestWorkspace();
         await using var factory = CreateFactory(workspace.Root);
         using var client = CreateClient(factory);
         using var package = TestWorkspace.Package("cargo/index/config.json", "{\"dl\":\"/cargo/crates/{crate}/{crate}-{version}.crate\"}");
-        var imported = await factory.Services.GetRequiredService<PackageCatalog>().ImportAsync(package, "fixture.rpk", TestWorkspace.Administrator);
+        var imported = await factory.Services.GetRequiredService<PackageCatalog>().ImportAsync(package, "fixture.rpk", factory.Services.GetRequiredService<AdministratorAccess>().Authenticate("admin", TestKey)!);
         var source = await client.GetStringAsync("/cargo/index/config.json");
         JsonDocument.Parse(source).RootElement.GetProperty("dl").GetString().Should().StartWith("https://localhost/cargo/crates/");
         var immutable = await client.GetStringAsync($"/packages/{imported.Id}/cargo/index/config.json");

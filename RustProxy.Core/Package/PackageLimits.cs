@@ -11,13 +11,15 @@ public sealed class PackageLimits
     public long MaxExpandedBytes { get; init; } = 32L * 1024 * 1024 * 1024;
     /// <summary>Maximum JSON manifest bytes.</summary>
     public long MaxManifestBytes { get; init; } = 16L * 1024 * 1024;
+    /// <summary>Maximum central-directory bytes parsed before allocating ZIP entries.</summary>
+    public long MaxDirectoryBytes { get; init; } = 32L * 1024 * 1024;
     /// <summary>Maximum file entries.</summary>
     public int MaxFiles { get; init; } = 100_000;
 
     /// <summary>Rejects invalid quota configuration.</summary>
     public void Validate()
     {
-        if (MaxPackageBytes <= 0 || MaxFileBytes <= 0 || MaxExpandedBytes <= 0 || MaxManifestBytes <= 0 || MaxFiles <= 0)
+        if (MaxPackageBytes <= 0 || MaxFileBytes <= 0 || MaxExpandedBytes <= 0 || MaxManifestBytes <= 0 || MaxDirectoryBytes <= 0 || MaxFiles <= 0)
             throw new ArgumentException("All package limits must be positive.");
     }
 }

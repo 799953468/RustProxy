@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Text;
 using System.Text.Json;
 using RustProxy.Core.Package;
 using RustProxy.Core.Serialization;
@@ -10,9 +11,12 @@ namespace RustProxy.Core.Storage;
 public static class PackageStore
 {
     /// <summary>Creates an archive beside the destination and atomically replaces it after success.</summary>
-    public static async Task CreateFromDirectoryAsync(string sourceDirectory, string outputPath, string name, string? source, PackageManifest? metadata = null, CancellationToken cancellationToken = default)
+    public static async Task CreateFromDirectoryAsync(string sourceDirectory, string outputPath, string name, string? source, PackageManifest? metadata = null, CancellationToken cancellationToken = default, PackageLimits? limits = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        limits ??= new PackageLimits();
+        limits.Validate();
+        cancellationToken.ThrowIfCancellationRequested();
         var root = Path.GetFullPath(sourceDirectory);
         var destination = Path.GetFullPath(outputPath);
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
@@ -21,37 +25,45 @@ public static class PackageStore
             throw new ArgumentException("The output package must be outside the source directory.", nameof(outputPath));
         PathSafety.RejectLink(root);
         PathSafety.RejectLink(destination);
-        var files = EnumerateFiles(root).Select(file => (File: file, Relative: PathSafety.Normalize(Path.GetRelativePath(root, file)))).ToArray();
-        if (files.Any(x => x.Relative.Equals("manifest.json", StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidDataException("manifest.json is reserved by the package format.");
         var manifest = metadata ?? new PackageManifest();
         manifest.Name = name;
         manifest.Source = source;
         manifest.Files = [];
+        ValidateManifest(manifest, limits);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         var temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true))
-            await using (var archive = new ZipArchive(output, ZipArchiveMode.Create))
+            await using (var bounded = new BoundedWriteStream(output, limits.MaxPackageBytes))
+            await using (var archive = new ZipArchive(bounded, ZipArchiveMode.Create, leaveOpen: true))
             {
-                foreach (var file in files)
+                long expandedBytes = 0;
+                foreach (var file in EnumerateFiles(root, Math.Max(1024, limits.MaxFiles), cancellationToken))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var checkedPath = PathSafety.Resolve(root, file.Relative);
-                    var extension = Path.GetExtension(file.File);
+                    if (manifest.Files.Count >= limits.MaxFiles) throw new InvalidDataException("Too many package files.");
+                    var relative = PathSafety.Normalize(Path.GetRelativePath(root, file));
+                    if (relative.Equals("manifest.json", StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("manifest.json is reserved by the package format.");
+                    var checkedPath = PathSafety.Resolve(root, relative);
+                    var extension = Path.GetExtension(file);
                     var compression = extension is ".xz" or ".gz" or ".zip" or ".crate" ? CompressionLevel.NoCompression : CompressionLevel.Fastest;
-                    var entry = archive.CreateEntry(file.Relative, compression);
+                    var entry = archive.CreateEntry(relative, compression);
                     await using var input = new FileStream(checkedPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
                     await using var entryStream = await entry.OpenAsync(cancellationToken);
-                    var result = await StreamTransfer.CopyAsync(input, entryStream, new PackageLimits().MaxFileBytes, cancellationToken);
-                    manifest.Files.Add(new PackageFile { Path = file.Relative, Length = result.Length, Sha256 = result.Sha256 });
+                    var result = await StreamTransfer.CopyAsync(input, entryStream, Math.Min(limits.MaxFileBytes, limits.MaxExpandedBytes - expandedBytes), cancellationToken);
+                    manifest.Files.Add(new PackageFile { Path = relative, Length = result.Length, Sha256 = result.Sha256 });
+                    expandedBytes += result.Length;
                 }
-                ValidateManifest(manifest, new PackageLimits());
+                ValidateManifest(manifest, limits);
                 await using var manifestStream = await archive.CreateEntry("manifest.json", CompressionLevel.Fastest).OpenAsync(cancellationToken);
-                await JsonSerializer.SerializeAsync(manifestStream, manifest, RustProxyJsonContext.Default.PackageManifest, cancellationToken);
+                await using var boundedManifest = new BoundedWriteStream(manifestStream, limits.MaxManifestBytes);
+                await JsonSerializer.SerializeAsync(boundedManifest, manifest, RustProxyJsonContext.Default.PackageManifest, cancellationToken);
             }
             cancellationToken.ThrowIfCancellationRequested();
+            await using (var completed = OpenPackage(temporary, limits))
+                await ZipDirectoryValidator.ValidateAsync(completed, limits, cancellationToken);
             File.Move(temporary, destination, overwrite: true);
         }
         finally { DeleteTemporary(temporary); }
@@ -63,6 +75,7 @@ public static class PackageStore
         limits ??= new PackageLimits();
         limits.Validate();
         await using var input = OpenPackage(packagePath, limits);
+        await ZipDirectoryValidator.ValidateAsync(input, limits, cancellationToken);
         await using var archive = new ZipArchive(input, ZipArchiveMode.Read);
         return await ReadManifestAsync(archive, limits, cancellationToken);
     }
@@ -73,6 +86,7 @@ public static class PackageStore
         ArgumentNullException.ThrowIfNull(options);
         options.Limits.Validate();
         await using var input = OpenPackage(options.PackagePath, options.Limits);
+        await ZipDirectoryValidator.ValidateAsync(input, options.Limits, cancellationToken);
         await using var archive = new ZipArchive(input, ZipArchiveMode.Read);
         var manifest = await ReadManifestAsync(archive, options.Limits, cancellationToken);
         var destination = Path.GetFullPath(options.DestinationDirectory);
@@ -153,7 +167,7 @@ public static class PackageStore
         {
             if (file is null) throw new InvalidDataException("Null file entry.");
             var normalized = PathSafety.Normalize(file.Path, sourceOnly);
-            if (normalized.Equals("manifest.json", StringComparison.OrdinalIgnoreCase) || !paths.Add(normalized) ||
+            if (normalized.Equals("manifest.json", StringComparison.OrdinalIgnoreCase) || !paths.Add(normalized.Normalize(NormalizationForm.FormC)) ||
                 file.Length < 0 || file.Length > limits.MaxFileBytes || file.Length > limits.MaxExpandedBytes - total ||
                 file.Sha256 is null || file.Sha256.Length != 64 || !file.Sha256.All(Uri.IsHexDigit))
                 throw new InvalidDataException($"Invalid or duplicate file entry: {file.Path}");
@@ -178,10 +192,10 @@ public static class PackageStore
 
     private static async Task<PackageManifest> ReadManifestAsync(ZipArchive archive, PackageLimits limits, CancellationToken cancellationToken)
     {
-        if (archive.Entries.Count > limits.MaxFiles + 1) throw new InvalidDataException("Too many archive entries.");
+        if (archive.Entries.Count > (long)limits.MaxFiles + 1) throw new InvalidDataException("Too many archive entries.");
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in archive.Entries)
-            if (!names.Add(PathSafety.Normalize(entry.FullName))) throw new InvalidDataException("Duplicate archive entry.");
+            if (!names.Add(PathSafety.Normalize(entry.FullName).Normalize(NormalizationForm.FormC))) throw new InvalidDataException("Duplicate archive entry.");
         var entryManifest = archive.GetEntry("manifest.json") ?? throw new InvalidDataException("Package does not contain manifest.json.");
         if (entryManifest.Length > limits.MaxManifestBytes) throw new InvalidDataException("Manifest is too large.");
         using var bytes = new MemoryStream();
@@ -209,17 +223,30 @@ public static class PackageStore
         throw new InvalidDataException("Compressed package exceeds the upload quota.");
     }
 
-    private static IEnumerable<string> EnumerateFiles(string root)
+    private static IEnumerable<string> EnumerateFiles(string root, int maximumDirectories, CancellationToken cancellationToken)
     {
-        foreach (var entry in Directory.EnumerateFileSystemEntries(root))
+        var pending = new Stack<IEnumerator<string>>();
+        var directories = 0;
+        pending.Push(Directory.EnumerateFileSystemEntries(root).GetEnumerator());
+        try
         {
-            PathSafety.RejectLink(entry);
-            if (Directory.Exists(entry))
+            while (pending.Count > 0)
             {
-                foreach (var nested in EnumerateFiles(entry)) yield return nested;
+                cancellationToken.ThrowIfCancellationRequested();
+                var current = pending.Peek();
+                if (!current.MoveNext()) { pending.Pop().Dispose(); continue; }
+                var entry = current.Current;
+                PathSafety.Normalize(Path.GetRelativePath(root, entry));
+                PathSafety.RejectLink(entry);
+                if (Directory.Exists(entry))
+                {
+                    if (++directories > maximumDirectories) throw new InvalidDataException("Too many source directories.");
+                    pending.Push(Directory.EnumerateFileSystemEntries(entry).GetEnumerator());
+                }
+                else yield return entry;
             }
-            else yield return entry;
         }
+        finally { foreach (var iterator in pending) iterator.Dispose(); }
     }
 
     /// <summary>Removes temporary artifacts, reporting cleanup failures through diagnostics.</summary>

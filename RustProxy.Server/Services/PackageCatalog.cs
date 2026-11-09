@@ -1,15 +1,15 @@
 using System.Security.Claims;
-using System.Security.Cryptography;
 using Microsoft.Extensions.Caching.Memory;
 using RustProxy.Core.Package;
 using RustProxy.Core.Storage;
 using RustProxy.Server.Entities;
+using RustProxy.Server.Security;
 using SqlSugar;
 
 namespace RustProxy.Server.Services;
 
 /// <summary>Publishes immutable file objects and transactionally records their package membership.</summary>
-public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarClient database, ILogger<PackageCatalog> logger, PackageLimits? limits = null) : IDisposable
+public sealed partial class PackageCatalog(IWebHostEnvironment environment, ISqlSugarClient database, ILogger<PackageCatalog> logger, AdministratorAccess access, PackageLimits? limits = null) : IDisposable
 {
     private readonly string _root = Path.Combine(environment.ContentRootPath, "data");
     private readonly SemaphoreSlim _commitLock = new(1, 1);
@@ -17,13 +17,9 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarCli
     private readonly MemoryCache _cache = new(new MemoryCacheOptions { SizeLimit = 16 * 1024 * 1024 });
     private readonly SemaphoreSlim _overviewLock = new(1, 1);
     private long _version;
-    private int _auditFailures = -1;
 
     /// <summary>Gets upload and extraction quotas enforced by the service.</summary>
     public PackageLimits Limits { get; } = limits ?? new();
-
-    /// <summary>Reports the last integrity audit outcome, or -1 while no audit has completed.</summary>
-    public int AuditFailures => Volatile.Read(ref _auditFailures);
 
     /// <summary>Gets the private storage root; HTTP paths are never resolved against this directory.</summary>
     public string RootDirectory => _root;
@@ -83,17 +79,19 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarCli
     /// <summary>Imports an administrator's bounded upload, then atomically publishes its database records.</summary>
     public async Task<(long Id, PackageManifest Manifest)> ImportAsync(Stream package, string fileName, ClaimsPrincipal actor, CancellationToken cancellationToken = default)
     {
-        if (actor.Identity?.IsAuthenticated != true || !actor.IsInRole("Administrator")) throw new UnauthorizedAccessException("Administrator access is required.");
+        access.RequireAdministrator(actor);
         if (!fileName.EndsWith(".rpk", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Only .rpk files can be imported.");
         if (!await _uploads.WaitAsync(0, cancellationToken)) throw new InvalidOperationException("The import queue is full. Try again after an active import completes.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromMinutes(30));
         var token = deadline.Token;
-        var operation = PathSafety.Resolve(_root, "staging/" + Guid.NewGuid().ToString("N"));
-        var temporary = Path.Combine(operation, "upload.rpk");
-        var staging = Path.Combine(operation, "source");
+        string? operation = null;
         try
         {
+            operation = PathSafety.Resolve(_root, "staging/" + Guid.NewGuid().ToString("N"));
+            _activeOperations.TryAdd(operation, 0);
+            var temporary = Path.Combine(operation, "upload.rpk");
+            var staging = Path.Combine(operation, "source");
             Directory.CreateDirectory(operation);
             await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true))
                 await StreamTransfer.CopyAsync(package, output, Limits.MaxPackageBytes, token);
@@ -101,19 +99,17 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarCli
             PackageStore.ValidateManifest(manifest, Limits, sourceOnly: true);
             var drive = new DriveInfo(Path.GetPathRoot(operation)!);
             var required = manifest.Files.Sum(x => x.Length);
-            if (drive.AvailableFreeSpace < required + 64L * 1024 * 1024) throw new IOException("Insufficient free disk space for extraction.");
+            if (required > drive.AvailableFreeSpace - 64L * 1024 * 1024) throw new IOException("Insufficient free disk space for extraction.");
             await PackageStore.ImportAsync(new ImportOptions { PackagePath = temporary, DestinationDirectory = staging, Limits = Limits }, token);
             await _commitLock.WaitAsync(token);
+            var createdObjects = new List<string>();
             try
             {
-                // Objects are never overwritten. Unreferenced objects from an interrupted import are harmless.
-                foreach (var file in manifest.Files)
+                access.RequireAdministrator(actor);
+                foreach (var file in manifest.Files.DistinctBy(x => x.Sha256))
                 {
                     token.ThrowIfCancellationRequested();
-                    var target = ObjectPath(file.Sha256);
-                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                    if (!File.Exists(target)) File.Move(PathSafety.Resolve(staging, file.Path), target);
-                    else if (new FileInfo(target).Length != file.Length) throw new InvalidDataException("Stored object length does not match its checksum.");
+                    if (await PublishObjectAsync(staging, file, token)) createdObjects.Add(file.Sha256);
                 }
                 var id = SnowFlakeSingle.Instance.NextId();
                 using var transaction = database.Ado.UseTran();
@@ -136,16 +132,27 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarCli
                     {
                         Id = SnowFlakeSingle.Instance.NextId(), PackageId = id, Path = x.Path, Length = x.Length, Sha256 = x.Sha256
                     }).ToList()).ExecuteCommandAsync(token);
+                access.RequireAdministrator(actor);
                 transaction.CommitTran();
                 Interlocked.Increment(ref _version);
-                logger.LogInformation("Administrator {Actor} imported package {PackageId} ({Name}), {FileCount} files", actor.Identity.Name, id, manifest.Name, manifest.Files.Count);
+                logger.LogInformation("Administrator {Actor} imported package {PackageId} ({Name}), {FileCount} files", actor.Identity?.Name, id, manifest.Name, manifest.Files.Count);
                 return (id, manifest);
+            }
+            catch
+            {
+                // The transaction has disposed before cleanup; never delete an object whose publication succeeded.
+                await RemoveUnreferencedObjectsAsync(createdObjects, DateTime.MaxValue, CancellationToken.None);
+                throw;
             }
             finally { _commitLock.Release(); }
         }
         finally
         {
-            PackageStore.DeleteTemporary(operation);
+            if (operation is not null)
+            {
+                PackageStore.DeleteTemporary(operation);
+                _activeOperations.TryRemove(operation, out _);
+            }
             _uploads.Release();
         }
     }
@@ -155,7 +162,7 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarCli
     {
         if (source is not ("cargo" or "rustup") || !TryPath($"{source}/{path}", out var normalized)) return null;
         var file = await database.Queryable<PackageFileMetadata>().Where(x => x.Path == normalized).OrderByDescending(x => x.PackageId).FirstAsync(cancellationToken);
-        return ResolveObject(file);
+        return await ResolveObjectAsync(file, cancellationToken);
     }
 
     /// <summary>Resolves only an exact member of the requested immutable package.</summary>
@@ -163,7 +170,7 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarCli
     {
         if (id <= 0 || !TryPath(path, out var normalized)) return null;
         var file = await database.Queryable<PackageFileMetadata>().Where(x => x.PackageId == id && x.Path == normalized).FirstAsync(cancellationToken);
-        return ResolveObject(file);
+        return await ResolveObjectAsync(file, cancellationToken);
     }
 
     /// <summary>Migrates matching legacy resources without removing old files or historical metadata.</summary>
@@ -203,44 +210,10 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarCli
         }
     }
 
-    /// <summary>Audits unique immutable objects in bounded pages without deleting catalog history.</summary>
-    public async Task<int> AuditAsync(CancellationToken cancellationToken)
+    private async Task<StoredSourceFile?> ResolveObjectAsync(PackageFileMetadata? file, CancellationToken cancellationToken)
     {
-        var failures = 0;
-        var offset = 0;
-        while (true)
-        {
-            var files = await database.Queryable<PackageFileMetadata>().GroupBy(x => new { x.Sha256, x.Length })
-                .Select(x => new PackageFile { Sha256 = x.Sha256, Length = x.Length }).OrderBy(x => x.Sha256).Skip(offset).Take(500).ToListAsync(cancellationToken);
-            if (files.Count == 0) { Volatile.Write(ref _auditFailures, failures); return failures; }
-            foreach (var file in files)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var valid = false;
-                if (IsHash(file.Sha256))
-                {
-                    var path = ObjectPath(file.Sha256);
-                    if (File.Exists(path) && new FileInfo(path).Length == file.Length)
-                    {
-                        await using var input = File.OpenRead(path);
-                        valid = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken)).Equals(file.Sha256, StringComparison.OrdinalIgnoreCase);
-                    }
-                }
-                if (!valid)
-                {
-                    failures++;
-                    logger.LogError("Stored object {Checksum} is missing or corrupted; package metadata was retained", file.Sha256);
-                }
-            }
-            offset += files.Count;
-        }
-    }
-
-    private StoredSourceFile? ResolveObject(PackageFileMetadata? file)
-    {
-        if (file is null || !IsHash(file.Sha256)) return null;
-        var path = ObjectPath(file.Sha256);
-        return File.Exists(path) && new FileInfo(path).Length == file.Length ? new StoredSourceFile(path, file.Sha256.ToLowerInvariant()) : null;
+        if (file is null || !await VerifyObjectAsync(file.Sha256, file.Length, false, cancellationToken)) return null;
+        return new StoredSourceFile(ObjectPath(file.Sha256), file.Sha256.ToLowerInvariant());
     }
 
     private string ObjectPath(string hash) => PathSafety.Resolve(_root, $"objects/{hash[..2].ToLowerInvariant()}/{hash.ToLowerInvariant()}");
@@ -252,7 +225,11 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, ISqlSugarCli
     }
 
     /// <inheritdoc />
-    public void Dispose() { _cache.Dispose(); _overviewLock.Dispose(); _commitLock.Dispose(); _uploads.Dispose(); }
+    public void Dispose()
+    {
+        _cache.Dispose(); _overviewLock.Dispose(); _commitLock.Dispose(); _uploads.Dispose(); _auditLock.Dispose();
+        foreach (var gate in _objectLocks) gate.Dispose();
+    }
 }
 
 /// <summary>Catalog aggregates used by the home page.</summary>

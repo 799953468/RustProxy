@@ -3,7 +3,7 @@ using RustProxy.Server.Entities;
 
 namespace RustProxy.Server.Services;
 
-/// <summary>Initializes the package metadata database schema and removes stale records.</summary>
+/// <summary>Initializes the catalog and periodically checks stored object integrity.</summary>
 public sealed class PackageMetadataInitializer(ISqlSugarClient database, PackageCatalog catalog, ILogger<PackageMetadataInitializer> logger) : BackgroundService
 {
     /// <inheritdoc />
@@ -18,13 +18,22 @@ public sealed class PackageMetadataInitializer(ISqlSugarClient database, Package
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        try
+        await Task.Yield();
+        do
         {
-            await Task.Yield();
-            var failures = await catalog.AuditAsync(stoppingToken);
-            logger.LogInformation("Background integrity audit finished with {Failures} unavailable objects", failures);
+            try
+            {
+                var failures = await catalog.AuditAsync(stoppingToken);
+                logger.LogInformation("Background integrity audit finished with {Failures} unavailable objects", failures);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            catch (Exception exception) { logger.LogError(exception, "Background integrity audit failed; it will be retried and catalog history was retained"); }
+            try { await catalog.CleanupAsync(stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            catch (Exception exception) { logger.LogWarning(exception, "Storage maintenance failed; it will be retried"); }
+            try { await Task.Delay(TimeSpan.FromMinutes(15), stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-        catch (Exception exception) { logger.LogError(exception, "Background integrity audit failed; catalog history was retained"); }
+        while (!stoppingToken.IsCancellationRequested);
     }
 }
