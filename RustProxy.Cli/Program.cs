@@ -28,13 +28,8 @@ try
             Console.WriteLine($"Imported {manifest.Name} ({manifest.Files.Count} files)");
             return 0;
         case "fetch":
-            if (args.Length != 2) throw new ArgumentException("Usage: fetch <rustproxy.fetch.json>");
-            var configPath = Path.GetFullPath(args[1]);
-            var config = JsonSerializer.Deserialize(await File.ReadAllTextAsync(configPath, cancellationToken), RustProxyJsonContext.Default.FetchConfiguration) ??
-                         throw new InvalidDataException("Invalid fetch configuration.");
-            var configDirectory = Path.GetDirectoryName(configPath)!;
-            if (!Path.IsPathRooted(config.Output)) config.Output = Path.Combine(configDirectory, config.Output);
-            if (!string.IsNullOrWhiteSpace(config.CargoProject) && !Path.IsPathRooted(config.CargoProject)) config.CargoProject = Path.Combine(configDirectory, config.CargoProject);
+            if (args.Length != 2) throw new ArgumentException("Usage: fetch <rustproxy.fetch.json|.toml|Cargo.toml>");
+            var config = await ConfigurationConverter.ConvertAsync(args[1], cancellationToken);
             using (var client = new SourceHttpClient())
             {
                 var logger = new ConsoleFetchLogger();
@@ -64,4 +59,4 @@ catch (Exception exception) when (exception is ArgumentException or IOException 
     return 2;
 }
 
-static void PrintUsage() => Console.WriteLine("RustProxy\n\nCommands:\n  fetch <rustproxy.fetch.json>\n  pack <source-dir> <output.rpk> <name> [source-url]\n  download <source-url> <output.rpk> <name> <path> [path ...]\n  rustup-fetch <toolchain> <target> <output.rpk> <name>\n  import <package.rpk> <destination-dir>\n\nExpected source layout:\n  cargo/config.json, cargo/index/**, cargo/crates/**\n  rustup/dist/**, rustup/static/**");
+static void PrintUsage() => Console.WriteLine("RustProxy\n\nCommands:\n  fetch <rustproxy.fetch.json|.toml|Cargo.toml>\n  pack <source-dir> <output.rpk> <name> [source-url]\n  download <source-url> <output.rpk> <name> <path> [path ...]\n  import <package.rpk> <destination-dir>\n\nExpected source layout:\n  cargo/config.json, cargo/index/**, cargo/crates/**\n  rustup/dist/**, rustup/static/**");

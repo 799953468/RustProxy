@@ -49,6 +49,7 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
         if (!fileName.EndsWith(".rpk", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Only .rpk files can be imported.");
         var temporary = Path.Combine(Path.GetTempPath(), $"rustproxy-{Guid.NewGuid():N}.rpk");
         var staging = Path.Combine(Path.GetTempPath(), $"rustproxy-stage-{Guid.NewGuid():N}");
+        var backup = Path.Combine(Path.GetTempPath(), $"rustproxy-backup-{Guid.NewGuid():N}");
         await ImportLock.WaitAsync(cancellationToken);
         try
         {
@@ -59,42 +60,62 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
             await PackageStore.ImportAsync(new ImportOptions { PackagePath = temporary, DestinationDirectory = staging }, cancellationToken);
             Directory.CreateDirectory(_root);
             var files = manifest.Files.Select(file => (ManifestFile: file, Relative: NormalizeAndValidatePath(file.Path))).ToArray();
-            foreach (var (_, relative) in files)
+            var overwritten = new Dictionary<string, string?>(StringComparer.Ordinal);
+            try
             {
-                var sourcePath = Path.Combine(staging, relative.Replace('/', Path.DirectorySeparatorChar));
-                var targetPath = Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar));
-                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-                File.Copy(sourcePath, targetPath, overwrite: true);
-            }
+                Directory.CreateDirectory(backup);
+                foreach (var (_, relative) in files)
+                {
+                    var sourcePath = Path.Combine(staging, relative.Replace('/', Path.DirectorySeparatorChar));
+                    var targetPath = Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar));
+                    Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                    if (!overwritten.ContainsKey(targetPath))
+                    {
+                        if (File.Exists(targetPath))
+                        {
+                            var backupPath = Path.Combine(backup, relative.Replace('/', Path.DirectorySeparatorChar));
+                            Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+                            File.Copy(targetPath, backupPath);
+                            overwritten.Add(targetPath, backupPath);
+                        }
+                        else
+                        {
+                            overwritten.Add(targetPath, null);
+                        }
+                    }
 
-            var metadata = new PackageMetadata
-            {
-                Id = SnowFlakeSingle.Instance.NextId(),
-                FormatVersion = manifest.FormatVersion,
-                Name = manifest.Name,
-                CreatedAt = manifest.CreatedAt,
-                Source = manifest.Source
-            };
-            using var transaction = database.Ado.UseTran();
-            await database.Insertable(metadata).ExecuteCommandAsync(cancellationToken);
-            await database.Insertable(manifest.CargoDependencies.Select(x => new PackageCargoDependencyMetadata
+                    File.Copy(sourcePath, targetPath, overwrite: true);
+                }
+
+                var metadata = new PackageMetadata
                 {
                     Id = SnowFlakeSingle.Instance.NextId(),
-                    PackageId = metadata.Id,
-                    Name = x.Name,
-                    Version = x.Version,
-                    Checksum = x.Checksum }).ToList())
-                .ExecuteCommandAsync(cancellationToken);
-            await database.Insertable(manifest.Toolchains
-                    .Select(x => new PackageToolchainMetadata
+                    FormatVersion = manifest.FormatVersion,
+                    Name = manifest.Name,
+                    CreatedAt = manifest.CreatedAt,
+                    Source = manifest.Source
+                };
+                using var transaction = database.Ado.UseTran();
+                await database.Insertable(metadata).ExecuteCommandAsync(cancellationToken);
+                await database.Insertable(manifest.CargoDependencies.Select(x => new PackageCargoDependencyMetadata
                     {
                         Id = SnowFlakeSingle.Instance.NextId(),
                         PackageId = metadata.Id,
+                        Name = x.Name,
                         Version = x.Version,
-                        Target = x.Target
+                        Checksum = x.Checksum
                     }).ToList())
-                .ExecuteCommandAsync(cancellationToken);
-            await database.Insertable(manifest.Files.Select(x => new PackageFileMetadata
+                    .ExecuteCommandAsync(cancellationToken);
+                await database.Insertable(manifest.Toolchains
+                        .Select(x => new PackageToolchainMetadata
+                        {
+                            Id = SnowFlakeSingle.Instance.NextId(),
+                            PackageId = metadata.Id,
+                            Version = x.Version,
+                            Target = x.Target
+                        }).ToList())
+                    .ExecuteCommandAsync(cancellationToken);
+                await database.Insertable(manifest.Files.Select(x => new PackageFileMetadata
                     {
                         Id = SnowFlakeSingle.Instance.NextId(),
                         PackageId = metadata.Id,
@@ -103,10 +124,21 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
                         Sha256 = x.Sha256
                     })
                     .ToList())
-                .ExecuteCommandAsync(cancellationToken);
-            transaction.CommitTran();
-            Interlocked.Increment(ref _cacheVersion);
-            return (metadata.Id, manifest);
+                    .ExecuteCommandAsync(cancellationToken);
+                transaction.CommitTran();
+                Interlocked.Increment(ref _cacheVersion);
+                return (metadata.Id, manifest);
+            }
+            catch
+            {
+                foreach (var (path, backupPath) in overwritten)
+                {
+                    if (backupPath is null) File.Delete(path);
+                    else File.Copy(backupPath, path, overwrite: true);
+                }
+
+                throw;
+            }
         }
         finally
         {
@@ -121,6 +153,14 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
             try
             {
                 if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (Directory.Exists(backup)) Directory.Delete(backup, recursive: true);
             }
             catch
             {
@@ -263,8 +303,10 @@ public sealed class PackageCatalog(IWebHostEnvironment environment, IMemoryCache
 
     private static string NormalizeAndValidatePath(string path)
     {
-        var normalized = path.Replace('\\', '/').TrimStart('/');
-        if (string.IsNullOrWhiteSpace(normalized) || normalized.Contains("../", StringComparison.Ordinal) || normalized.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(normalized))
+        var normalized = path.Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(normalized) || normalized.StartsWith('/') ||
+            Path.IsPathRooted(path) || normalized.Contains(':') ||
+            normalized.Split('/').Any(segment => segment is "" or "." or ".."))
             throw new InvalidDataException($"Unsafe package path: {path}");
         return normalized;
     }

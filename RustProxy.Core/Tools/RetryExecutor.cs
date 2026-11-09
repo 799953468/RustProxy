@@ -34,9 +34,10 @@ public sealed class RetryExecutor(IFetchLogger logger)
         {
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 return await action();
             }
-            catch (Exception exception) when (attempt < maxAttempts && IsRetryable(exception))
+            catch (Exception exception) when (attempt < maxAttempts && !cancellationToken.IsCancellationRequested && IsRetryable(exception))
             {
                 last = exception;
                 var delay = TimeSpan.FromMilliseconds(initialDelay.TotalMilliseconds * Math.Pow(2, attempt - 1));
@@ -49,7 +50,7 @@ public sealed class RetryExecutor(IFetchLogger logger)
     }
 
     private static bool IsRetryable(Exception exception) =>
-        exception is IOException or TimeoutException or TaskCanceledException ||
+        exception is IOException or TimeoutException ||
         exception is HttpRequestException httpException &&
         (httpException.StatusCode is null || (int)httpException.StatusCode >= 500);
 }

@@ -62,10 +62,7 @@ public static class PackageStore
         Directory.CreateDirectory(destination);
         foreach (var file in manifest.Files)
         {
-            var normalized = Normalize(file.Path);
-            if (normalized.Contains("../", StringComparison.Ordinal) ||
-                normalized.StartsWith("../", StringComparison.Ordinal) ||
-                Path.IsPathRooted(normalized)) throw new InvalidDataException($"Unsafe package path: {file.Path}");
+            var normalized = NormalizeAndValidatePath(file.Path);
             var entry = archive.GetEntry(normalized) ?? throw new InvalidDataException($"Missing package file: {normalized}");
             var target =
                 Path.GetFullPath(Path.Combine(destination, normalized.Replace('/', Path.DirectorySeparatorChar)));
@@ -98,6 +95,16 @@ public static class PackageStore
     }
 
     private static string Normalize(string path) => path.Replace('\\', '/');
+
+    private static string NormalizeAndValidatePath(string path)
+    {
+        var normalized = Normalize(path);
+        if (string.IsNullOrWhiteSpace(normalized) || normalized.StartsWith('/') ||
+            Path.IsPathRooted(path) || normalized.Contains(':') ||
+            normalized.Split('/').Any(segment => segment is "" or "." or ".."))
+            throw new InvalidDataException($"Unsafe package path: {path}");
+        return normalized;
+    }
 
     private static async Task<string> HashFileAsync(string path, CancellationToken cancellationToken)
     {
